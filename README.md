@@ -3,10 +3,10 @@
 **CD-Former** is a Graphormer-based implementation for Human Action Recognition (HAR) using 3D skeleton data from NTU RGB+D 120. The repository includes a complete training and evaluation pipeline based on PyTorch, with support for spatial skeleton modeling, reset-based training, frozen-backbone fine-tuning, and evaluation across NTU120 validation splits.
 
 <p align="center">
-  <img src="assets/figures/architecture.png" alt="CD-Former architecture" width="780">
+  <img src="assets/figures/cdformer_attention_examples.png" alt="CD-Former attention examples" width="950">
 </p>
 
-<p align="center"><em>Suggested figure: CD-Former architecture or training pipeline.</em></p>
+<p align="center"><em>Example qualitative visualization with input skeleton sequences, temporal attention, joint attention, and top-3 model predictions.</em></p>
 
 ---
 
@@ -31,6 +31,7 @@ graphormer_spatial_reset_full.py
 - Reset-head training strategy.
 - Frozen-backbone fine-tuning with scheduled unfreezing.
 - CUDA support for GPU acceleration.
+- Qualitative attention visualization and confusion-matrix based evaluation.
 
 ---
 
@@ -48,7 +49,10 @@ CD_FORMER/
 │   └── train_cdformer.sh
 └── assets/
     ├── figures/
-    │   └── architecture.png
+    │   ├── cdformer_attention_examples.png
+    │   ├── confusion_matrix_16f.png
+    │   ├── confusion_matrix_24f.png
+    │   └── confusion_matrix_32f.png
     └── videos/
         └── demo.mp4
 ```
@@ -169,6 +173,40 @@ For Google Colab, use:
 
 ---
 
+## Qualitative Visualization
+
+The qualitative visualization below illustrates how CD-Former processes skeleton sequences and highlights temporal and joint-level attention patterns.
+
+<p align="center">
+  <img src="assets/figures/cdformer_attention_examples.png" alt="CD-Former qualitative attention visualization" width="950">
+</p>
+
+---
+
+## Confusion Matrices
+
+The following matrices summarize validation behavior under different temporal settings.
+
+<p align="center">
+  <img src="assets/figures/confusion_matrix_16f.png" alt="CD-Former confusion matrix with 16 frames" width="800">
+</p>
+
+<p align="center"><em>Validation confusion matrix using 16 frames.</em></p>
+
+<p align="center">
+  <img src="assets/figures/confusion_matrix_24f.png" alt="CD-Former confusion matrix with 24 frames" width="800">
+</p>
+
+<p align="center"><em>Validation confusion matrix using 24 frames.</em></p>
+
+<p align="center">
+  <img src="assets/figures/confusion_matrix_32f.png" alt="CD-Former confusion matrix with 32 frames" width="800">
+</p>
+
+<p align="center"><em>Validation confusion matrix using 32 frames.</em></p>
+
+---
+
 ## Demo Video
 
 A demonstration video can be added under:
@@ -177,26 +215,11 @@ A demonstration video can be added under:
 assets/videos/demo.mp4
 ```
 
-When the file is uploaded to the repository, it can be referenced from this section.
-
 <p align="center">
   <video src="assets/videos/demo.mp4" controls width="780"></video>
 </p>
 
 If GitHub does not render the video inline, open it directly from the `assets/videos/` folder.
-
----
-
-## Suggested Media Files
-
-To improve the presentation of the repository, add the following files:
-
-```text
-assets/figures/architecture.png      Main CD-Former architecture diagram
-assets/figures/pipeline.png          Dataset and training pipeline
-assets/figures/confusion_matrix.png  Evaluation result visualization
-assets/videos/demo.mp4               Short demonstration video
-```
 
 ---
 
