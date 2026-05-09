@@ -6,6 +6,8 @@ pandas
 scikit-learn
 matplotlib
 seaborn
+psutil
+thop
 tqdm
 pyyaml
 opencv-python
