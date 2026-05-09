@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and experiment outputs
+*.log
+logs/
+runs/
+wandb/
+metrics/
+outputs/
+experiments/
+
+# Datasets and large generated files
+data/
+datasets/
+*.pkl
+*.npz
+*.npy
+*.mp4
+*.avi
+
+# Checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+weights/
+
+# Keep README placeholders inside assets if needed
+!assets/
+!assets/figures/
+!assets/videos/
