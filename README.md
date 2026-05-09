@@ -6,7 +6,23 @@
 
 ---
 
-## Visual Overview
+## Model Architecture
+
+![CD-Former architecture](assets/figures/cdformer_architecture.png)
+
+CD-Former receives a skeleton sequence, projects the input features into a latent representation, adds temporal and joint embeddings, prepends a CLS token, and processes the resulting sequence through stacked CD-Former blocks. The final prediction is obtained by combining the CLS token representation with average-pooled sequence features before the classification head.
+
+---
+
+## Contextual Dynamic Attention
+
+![Contextual Dynamic Attention block](assets/figures/contextual_dynamic_attention.png)
+
+The attention module combines temporal and joint-aware embeddings before computing multi-head self-attention. This allows the model to represent both frame-level motion progression and joint-level spatial dependencies in the skeleton sequence.
+
+---
+
+## Qualitative Visualization
 
 ![CD-Former qualitative attention visualization](assets/figures/cdformer_attention_examples.png)
 
@@ -61,6 +77,8 @@ CD_FORMER/
 │   └── train_cdformer.sh
 └── assets/
     ├── figures/
+    │   ├── cdformer_architecture.png
+    │   ├── contextual_dynamic_attention.png
     │   ├── cdformer_attention_examples.png
     │   ├── confusion_matrix_16f.png
     │   ├── confusion_matrix_24f.png
