@@ -68,10 +68,11 @@ graphormer_spatial_reset_full.py
 ```text
 CD_FORMER/
 ├── graphormer_spatial_reset_full.py
-├── best_graphormer.pth
 ├── ntu120_3danno.pkl
 ├── README.md
 ├── requirements.txt
+├── checkpoints/
+│   └── CD_former.pth
 ├── scripts/
 │   ├── eval_cdformer.sh
 │   └── train_cdformer.sh
@@ -87,7 +88,7 @@ CD_FORMER/
         └── demo.mp4
 ```
 
-Large files such as datasets and checkpoints may be omitted from the repository depending on GitHub size limits. If they are not included, place them locally using the same names shown above.
+Large files such as datasets may be omitted from the repository depending on GitHub size limits. If they are not included, place them locally using the same names shown above.
 
 ---
 
@@ -135,6 +136,18 @@ Place the dataset file in the root directory of the repository or update the `--
 
 ---
 
+## Pretrained Checkpoint
+
+The pretrained CD-Former checkpoint should be placed at:
+
+```text
+checkpoints/CD_former.pth
+```
+
+The evaluation script uses this path by default in the examples below.
+
+---
+
 ## Evaluation
 
 Use this command to evaluate a trained CD-Former checkpoint:
@@ -142,7 +155,7 @@ Use this command to evaluate a trained CD-Former checkpoint:
 ```bash
 python graphormer_spatial_reset_full.py \
   --eval_only \
-  --weights best_graphormer.pth \
+  --weights checkpoints/CD_former.pth \
   --val_xsub xsub_val \
   --val_xset xset_val \
   --frames 32 \
@@ -157,7 +170,7 @@ For Google Colab, use:
 ```python
 !python graphormer_spatial_reset_full.py \
   --eval_only \
-  --weights best_graphormer.pth \
+  --weights checkpoints/CD_former.pth \
   --val_xsub xsub_val \
   --val_xset xset_val \
   --frames 32 --d_model 192 --heads 8 --layers 12 \
