@@ -46,7 +46,11 @@ datasets/
 checkpoints/
 weights/
 
-# Keep README placeholders inside assets if needed
+# Allow selected README media files
 !assets/
 !assets/figures/
+!assets/figures/*.png
+!assets/figures/*.jpg
+!assets/figures/*.jpeg
 !assets/videos/
+!assets/videos/demo.mp4
