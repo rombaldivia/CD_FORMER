@@ -54,3 +54,7 @@ weights/
 !assets/figures/*.jpeg
 !assets/videos/
 !assets/videos/demo.mp4
+
+# Allow the released CD-Former checkpoint
+!checkpoints/
+!checkpoints/CD_former.pth
