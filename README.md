@@ -40,12 +40,12 @@ The qualitative visualization shows input skeleton sequences, temporal attention
 
 ## Overview
 
-**CD-Former** is a Graphormer-based implementation for Human Action Recognition (HAR) using 3D skeleton data from NTU RGB+D 120. The repository includes a complete training and evaluation pipeline based on PyTorch, with support for spatial skeleton modeling, reset-based training, frozen-backbone fine-tuning, and evaluation across NTU120 validation splits.
+**CD-Former** is a Graphormer-based implementation for Human Action Recognition (HAR) using 3D skeleton data from NTU RGB+D 120. The repository includes a PyTorch evaluation pipeline for NTU120 validation splits, pretrained checkpoint loading, temporal embedding reset for different frame settings, and metric generation.
 
-The model is implemented in a single main script:
+The standalone evaluation script is:
 
 ```text
-graphormer_spatial_reset_full.py
+graphormer_frames_reset_eval.py
 ```
 
 ---
@@ -53,13 +53,12 @@ graphormer_spatial_reset_full.py
 ## Main Features
 
 - Graphormer-based spatial modeling for 3D skeleton sequences.
-- Support for NTU RGB+D 120 training and validation splits.
-- Evaluation-only mode for trained checkpoints.
+- Support for NTU RGB+D 120 xsub and xset validation splits.
+- Standalone evaluation script for pretrained checkpoints.
 - Configurable number of frames, embedding dimension, attention heads, and Transformer layers.
-- Reset-head training strategy.
-- Frozen-backbone fine-tuning with scheduled unfreezing.
-- CUDA support for GPU acceleration.
-- Qualitative attention visualization and confusion-matrix based evaluation.
+- Temporal embedding reset when evaluating a checkpoint with a different frame setting.
+- Metrics: Top-1, Top-5, recall, F1, balanced accuracy, Cohen's kappa, Matthews coefficient, GFLOPs, FPS, latency, RAM/VRAM usage.
+- Confusion matrices and CSV reports saved automatically.
 
 ---
 
@@ -67,8 +66,7 @@ graphormer_spatial_reset_full.py
 
 ```text
 CD_FORMER/
-├── graphormer_spatial_reset_full.py
-├── ntu120_3danno.pkl
+├── graphormer_frames_reset_eval.py
 ├── README.md
 ├── requirements.txt
 ├── checkpoints/
@@ -88,7 +86,7 @@ CD_FORMER/
         └── demo.mp4
 ```
 
-Large files such as datasets may be omitted from the repository depending on GitHub size limits. If they are not included, place them locally using the same names shown above.
+Large files such as datasets are not included in the repository. The NTU120 annotation file is downloaded automatically by the evaluation script.
 
 ---
 
@@ -118,21 +116,24 @@ pip install -r requirements.txt
 
 ## Dataset
 
-This implementation expects the NTU RGB+D 120 annotation file in PKL format:
+The evaluation pipeline uses the NTU RGB+D 120 annotation file:
 
 ```text
 ntu120_3danno.pkl
 ```
 
-The expected split names used in the current training and evaluation commands are:
+The script downloads it from the OpenMMLab/MMAction public resource when it is not already available:
 
 ```text
-xsub_train
+https://download.openmmlab.com/mmaction/pyskl/data/nturgbd/ntu120_3danno.pkl
+```
+
+Expected validation splits:
+
+```text
 xsub_val
 xset_val
 ```
-
-Place the dataset file in the root directory of the repository or update the `--pkl` argument with the correct path.
 
 ---
 
@@ -144,17 +145,29 @@ The pretrained CD-Former checkpoint should be placed at:
 checkpoints/CD_former.pth
 ```
 
-The evaluation script uses this path by default in the examples below.
-
 ---
 
 ## Evaluation
 
-Use this command to evaluate a trained CD-Former checkpoint:
+Recommended full evaluation:
 
 ```bash
-python graphormer_spatial_reset_full.py \
-  --eval_only \
+bash scripts/eval_cdformer.sh
+```
+
+The script evaluates 16, 24, and 32-frame settings and saves outputs under:
+
+```text
+results/metrics_eval_16f
+results/metrics_eval_24f
+results/metrics_eval_32f
+```
+
+To run one specific setting manually:
+
+```bash
+python graphormer_frames_reset_eval.py \
+  --pkl /data/nturgbd/ntu120_3danno.pkl \
   --weights checkpoints/CD_former.pth \
   --val_xsub xsub_val \
   --val_xset xset_val \
@@ -162,57 +175,35 @@ python graphormer_spatial_reset_full.py \
   --d_model 192 \
   --heads 8 \
   --layers 12 \
-  --device cuda
+  --batch 32 \
+  --device cpu \
+  --num_workers 2 \
+  --outdir results/metrics_eval_32f
 ```
 
-For Google Colab, use:
+For GPU-enabled environments, use:
 
-```python
-!python graphormer_spatial_reset_full.py \
-  --eval_only \
-  --weights checkpoints/CD_former.pth \
-  --val_xsub xsub_val \
-  --val_xset xset_val \
-  --frames 32 --d_model 192 --heads 8 --layers 12 \
-  --device cuda
+```bash
+DEVICE=cuda bash scripts/eval_cdformer.sh
 ```
 
 ---
 
-## Training
+## Code Ocean
 
-Use this command to train CD-Former on the NTU120 cross-subject split:
+For Code Ocean, the reproducible run can use:
 
 ```bash
-python graphormer_spatial_reset_full.py \
-  --pkl ntu120_3danno.pkl \
-  --train_split xsub_train \
-  --val_split xsub_val \
-  --val_xsub xsub_val \
-  --val_xset xset_val \
-  --frames 32 \
-  --d_model 192 \
-  --heads 8 \
-  --layers 12 \
-  --reset_head \
-  --freeze_n 12 \
-  --unfreeze_epoch 15 \
-  --device cuda
+bash /code/scripts/eval_cdformer.sh
 ```
 
-For Google Colab, use:
+If the checkpoint is stored directly as `/code/CD_former.pth`, run:
 
-```python
-!python graphormer_spatial_reset_full.py \
-  --pkl ntu120_3danno.pkl \
-  --train_split xsub_train \
-  --val_split xsub_val \
-  --val_xsub xsub_val \
-  --val_xset xset_val \
-  --frames 32 --d_model 192 --heads 8 --layers 12 \
-  --reset_head --freeze_n 12 --unfreeze_epoch 15 \
-  --device cuda
+```bash
+WEIGHTS_PATH=/code/CD_former.pth CODE_DIR=/code RESULTS_DIR=/results bash /code/scripts/eval_cdformer.sh
 ```
+
+The recommended Code Ocean post-install dependencies are the same as `requirements.txt`, plus `wget` for downloading the NTU120 annotation file.
 
 ---
 
@@ -228,22 +219,14 @@ GitHub README pages usually render images directly, but video files are more rel
 
 ## Reproducibility Notes
 
-For reproducible experiments, keep the following settings consistent:
+Default evaluation settings:
 
 ```text
-frames   = 32
 d_model  = 192
 heads    = 8
 layers   = 12
-```
-
-Recommended training configuration:
-
-```text
-reset_head      = enabled
-freeze_n        = 12
-unfreeze_epoch  = 15
-device          = cuda
+frames   = 16, 24, 32
+device   = cpu by default, cuda optional
 ```
 
 ---
@@ -265,4 +248,4 @@ If this repository is useful for your research, please cite the accompanying man
 
 ## License
 
-This repository is intended for academic and research use.
+This repository is licensed for noncommercial academic and research use. Commercial use requires a separate written license agreement with the author. See `LICENSE` and `COMMERCIAL.md` for details.
