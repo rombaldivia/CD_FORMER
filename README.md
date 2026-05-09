@@ -14,6 +14,5 @@ A pure Graphormer implementation for Human Action Recognition (HAR) from 3-D ske
   
 -  Automatic confusion matrix and loss curves saved under ./metrics/.
   
--  Stratified 70 / 20 / 10 split helper in tools/split_ntu.py.
-  
+- 
 -  Multi-GPU support (DataParallel) and AMP mixed-precision ready.
