@@ -1,11 +1,11 @@
 # CD-Former
 
 <p align="center">
-  <strong>CD-Former: A Contextual Dynamic Transformer for Efficient Human Action Recognition</strong>
+  <strong>CD-Former: Pure-Transformer Skeleton-Based Human Action Recognition</strong>
 </p>
 
 <p align="center">
-  Pure Transformer architecture for skeleton-based HAR, designed for accurate and resource-efficient inference.
+  Contextual Dynamic Self-Attention for efficient 3D motion modeling on NTU RGB+D 120.
 </p>
 
 ---
