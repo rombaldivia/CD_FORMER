@@ -1,7 +1,11 @@
 # CD-Former
 
 <p align="center">
-  <strong>Graphormer-based Human Action Recognition with spatial skeleton modeling and reset-based fine-tuning</strong>
+  <strong>CD-Former: A Contextual Dynamic Transformer for Efficient Human Action Recognition</strong>
+</p>
+
+<p align="center">
+  Pure Transformer architecture for skeleton-based HAR, designed for accurate and resource-efficient inference.
 </p>
 
 ---
@@ -40,7 +44,9 @@ The qualitative visualization shows input skeleton sequences, temporal attention
 
 ## Overview
 
-**CD-Former** is a Graphormer-based implementation for Human Action Recognition (HAR) using 3D skeleton data from NTU RGB+D 120. The repository includes a PyTorch evaluation pipeline for NTU120 validation splits, pretrained checkpoint loading, temporal embedding reset for different frame settings, and metric generation.
+**CD-Former** is an efficient pure-Transformer framework for skeleton-based Human Action Recognition (HAR). It represents 3D joint sequences as contextual spatiotemporal tokens and models motion through Contextual Dynamic Self-Attention, without relying on graph-convolutional, recurrent, convolutional, hybrid, or multi-branch modules.
+
+The architecture is designed to provide a strong balance between recognition accuracy, computational complexity, and practical deployability. This repository provides a PyTorch evaluation pipeline for NTU RGB+D 120, pretrained checkpoint loading, configurable 16-, 24-, and 32-frame evaluation, temporal embedding adaptation, and detailed efficiency measurements for both conventional and edge-oriented environments.
 
 The standalone evaluation script is:
 
@@ -52,13 +58,16 @@ graphormer_frames_reset_eval.py
 
 ## Main Features
 
-- Graphormer-based spatial modeling for 3D skeleton sequences.
+- Pure Transformer architecture for 3D skeleton-based Human Action Recognition.
+- Contextual Dynamic Self-Attention with temporal and joint-aware representations.
+- Compact spatiotemporal tokenization without graph-convolutional or recurrent modules.
 - Support for NTU RGB+D 120 xsub and xset validation splits.
 - Standalone evaluation script for pretrained checkpoints.
 - Configurable number of frames, embedding dimension, attention heads, and Transformer layers.
-- Temporal embedding reset when evaluating a checkpoint with a different frame setting.
+- Temporal embedding adaptation when evaluating checkpoints at different frame settings.
 - Metrics: Top-1, Top-5, recall, F1, balanced accuracy, Cohen's kappa, Matthews coefficient, GFLOPs, FPS, latency, RAM/VRAM usage.
 - Confusion matrices and CSV reports saved automatically.
+- Designed for efficient inference and deployment-aware evaluation, including edge hardware.
 
 ---
 
