@@ -5,6 +5,9 @@ With two visible GPUs, XSUB uses one GPU and XSET uses the other. With one,
 the protocols run sequentially. Each protocol trains T16 first, then transfers
 its own T16 weights independently to T24 and T32. Use --initialization scratch
 for independent random initialization at every frame length.
+
+Each child receives a fixed tqdm row and label, so XSUB/GPU0 and XSET/GPU1 can
+remain visible together while reporting live loss and Top-1 accuracy.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,9 +35,11 @@ def find_annotation(explicit='', input_root='/kaggle/input'):
         return path
     matches = sorted(Path(input_root).rglob('ntu120_3danno.pkl'))
     if len(matches) != 1:
-        raise ValueError(f'Found {len(matches)} ntu120_3danno.pkl files under {input_root}. '
-                         'Attach the NTU120 annotation dataset and set --pkl to its exact path. '
-                         f'Candidates: {[str(p) for p in matches]}')
+        raise ValueError(
+            f'Found {len(matches)} ntu120_3danno.pkl files under {input_root}. '
+            'Attach the NTU120 annotation dataset and set --pkl to its exact path. '
+            f'Candidates: {[str(p) for p in matches]}'
+        )
     return matches[0].resolve()
 
 
@@ -50,18 +55,24 @@ def run_directory(args, protocol, frames):
 
 
 def command_for(args, protocol, frames, pkl):
-    cmd = [sys.executable, '-u', str(ROOT / 'cd_former_official.py'),
-           '--pkl', str(pkl), '--protocol', protocol, '--frames', str(frames),
-           '--seed', str(args.seed), '--split-seed', str(args.split_seed),
-           '--val-fraction', str(args.val_fraction), '--outdir', str(run_directory(args, protocol, frames)),
-           '--device', 'cuda', '--workers', str(args.workers), '--batch', str(args.batch),
-           '--epochs', str(args.epochs), '--stop', str(args.stop), '--lr', str(args.lr),
-           '--d_model', str(args.d_model), '--heads', str(args.heads), '--layers', str(args.layers),
-           '--dropout', str(args.dropout), '--jitter', str(args.jitter),
-           '--scheduler', args.scheduler, '--warmup_epochs', str(args.warmup_epochs),
-           '--plot-every', str(args.plot_every), '--resume', 'auto']
+    cmd = [
+        sys.executable, '-u', str(ROOT / 'cd_former_official.py'),
+        '--pkl', str(pkl), '--protocol', protocol, '--frames', str(frames),
+        '--seed', str(args.seed), '--split-seed', str(args.split_seed),
+        '--val-fraction', str(args.val_fraction),
+        '--outdir', str(run_directory(args, protocol, frames)),
+        '--device', 'cuda', '--workers', str(args.workers), '--batch', str(args.batch),
+        '--epochs', str(args.epochs), '--stop', str(args.stop), '--lr', str(args.lr),
+        '--d_model', str(args.d_model), '--heads', str(args.heads), '--layers', str(args.layers),
+        '--dropout', str(args.dropout), '--jitter', str(args.jitter),
+        '--scheduler', args.scheduler, '--warmup_epochs', str(args.warmup_epochs),
+        '--plot-every', str(args.plot_every), '--resume', 'auto',
+    ]
     if args.initialization == 'reframe' and frames != 16:
-        cmd += ['--pretrained', str(run_directory(args, protocol, 16) / 'best_graphormer.pth')]
+        cmd += [
+            '--pretrained',
+            str(run_directory(args, protocol, 16) / 'best_graphormer.pth'),
+        ]
     if args.skip_test:
         cmd.append('--skip-test')
     if args.no_progress:
@@ -87,11 +98,20 @@ def restore_run(args, protocol, frames):
 
 def run_protocol(args, protocol, gpu, pkl):
     env = os.environ.copy()
-    visible = env.get('CUDA_VISIBLE_DEVICES', '').split(',')
-    env['CUDA_VISIBLE_DEVICES'] = visible[gpu] if visible != [''] else str(gpu)
+    inherited_visible = [
+        part.strip() for part in env.get('CUDA_VISIBLE_DEVICES', '').split(',') if part.strip()
+    ]
+    env['CUDA_VISIBLE_DEVICES'] = inherited_visible[gpu] if inherited_visible else str(gpu)
     env['PYTHONUNBUFFERED'] = '1'
+    env.setdefault('PYTHONIOENCODING', 'utf-8')
     env.setdefault('OMP_NUM_THREADS', '2')
     env.setdefault('MKL_NUM_THREADS', '2')
+    env.setdefault('TQDM_MININTERVAL', '0.2')
+    # The child sees its selected card as cuda:0, but the display keeps the
+    # launcher's logical assignment so the notebook shows XSUB GPU0 / XSET GPU1.
+    env['CDFORMER_PROGRESS_POSITION'] = str(gpu)
+    env['CDFORMER_PROGRESS_LABEL'] = f'{protocol.upper()} GPU{gpu}'
+
     results = []
     for frames in frame_order(args.frames, args.initialization):
         if STOP.is_set():
@@ -140,28 +160,70 @@ def terminate_children():
             child.wait()
 
 
+def cuda_inventory(torch):
+    count = torch.cuda.device_count()
+    rows = []
+    for index in range(count):
+        try:
+            name = torch.cuda.get_device_name(index)
+        except Exception as exc:  # diagnostics must not hide the real launcher error
+            name = f'<name unavailable: {exc}>'
+        rows.append((index, name))
+    return count, rows
+
+
 def main(args):
     import torch
+
     pkl = find_annotation(args.pkl)
-    count = torch.cuda.device_count()
+    count, inventory = cuda_inventory(torch)
     gpu_ids = args.gpus if args.gpus is not None else list(range(count))
     if args.dry_run and not gpu_ids:
         gpu_ids = [0]
+
+    print(f'CUDA available: {torch.cuda.is_available()} | visible devices: {count}', flush=True)
+    if inventory:
+        for index, name in inventory:
+            print(f'  GPU {index}: {name}', flush=True)
+    else:
+        print(
+            '  No CUDA device is visible to PyTorch. In Kaggle select a GPU accelerator '
+            '(T4 x2 for concurrent XSUB/XSET) and restart the session.',
+            flush=True,
+        )
+
     if not gpu_ids or (not args.dry_run and any(g < 0 or g >= count for g in gpu_ids)):
-        raise RuntimeError('Select a GPU accelerator in Kaggle; --gpus must name visible GPU indices.')
+        raise RuntimeError(
+            'No valid visible GPU was selected. Kaggle must report at least one CUDA device; '
+            '--gpus uses the visible PyTorch indices shown above.'
+        )
     if len(set(gpu_ids)) != len(gpu_ids) or len(set(args.protocols)) != len(args.protocols):
         raise ValueError('GPU IDs and protocols must not contain duplicates')
-    print(f'Annotation: {pkl}\nStages: {frame_order(args.frames, args.initialization)}\n'
-          f'Outputs: {args.output_root}\nInitialization: {args.initialization}', flush=True)
+
+    print(
+        f'Annotation: {pkl}\n'
+        f'Stages: {frame_order(args.frames, args.initialization)}\n'
+        f'Outputs: {args.output_root}\n'
+        f'Initialization: {args.initialization}\n'
+        f'GPU assignment: '
+        + ', '.join(
+            f'{protocol.upper()}→GPU{gpu_ids[i % len(gpu_ids)]}'
+            for i, protocol in enumerate(args.protocols)
+        ),
+        flush=True,
+    )
+
     jobs = min(len(gpu_ids), len(args.protocols))
     # Assign each GPU its own sequential protocol queue; never share a GPU
     # between two concurrently running training processes.
     queues = [args.protocols[i::jobs] for i in range(jobs)]
+
     def worker(i):
         records = []
         for protocol in queues[i]:
             records.extend(run_protocol(args, protocol, gpu_ids[i], pkl))
         return records
+
     executor = ThreadPoolExecutor(max_workers=jobs)
     futures = [executor.submit(worker, i) for i in range(jobs)]
     records = []
@@ -175,29 +237,46 @@ def main(args):
         raise
     finally:
         executor.shutdown(wait=True, cancel_futures=True)
+
     if not args.dry_run:
         output = Path(args.output_root)
         output.mkdir(parents=True, exist_ok=True)
         records.sort(key=lambda r: (r['protocol'], r['frames']))
-        (output / 'summary.json').write_text(json.dumps(records, indent=2) + '\n', encoding='utf-8')
+        (output / 'summary.json').write_text(
+            json.dumps(records, indent=2) + '\n', encoding='utf-8'
+        )
         for r in records:
-            print(f"{r['protocol'].upper()} T{r['frames']}: {r['official_test_accuracy']:.4f}% "
-                  f"on {r['official_test_n']:,} official test clips")
+            print(
+                f"{r['protocol'].upper()} T{r['frames']}: "
+                f"{r['official_test_accuracy']:.4f}% on "
+                f"{r['official_test_n']:,} official test clips",
+                flush=True,
+            )
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pkl', default='')
-    parser.add_argument('--protocols', nargs='+', choices=['xsub', 'xset'], default=['xsub', 'xset'])
-    parser.add_argument('--frames', nargs='+', type=int, choices=[16, 24, 32], default=[16, 24, 32])
+    parser.add_argument(
+        '--protocols', nargs='+', choices=['xsub', 'xset'], default=['xsub', 'xset']
+    )
+    parser.add_argument(
+        '--frames', nargs='+', type=int, choices=[16, 24, 32], default=[16, 24, 32]
+    )
     parser.add_argument('--initialization', choices=['reframe', 'scratch'], default='reframe')
     parser.add_argument('--gpus', nargs='+', type=int, default=None)
     parser.add_argument('--output-root', default='/kaggle/working/cdformer_official_runs')
-    parser.add_argument('--restore-root', default='', help='Previous saved output root containing xsub/ and xset/')
+    parser.add_argument(
+        '--restore-root', default='',
+        help='Previous saved output root containing xsub/ and xset/',
+    )
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--split-seed', type=int, default=42)
     parser.add_argument('--val-fraction', type=float, default=0.1)
-    parser.add_argument('--batch', type=int, default=32, help='Per-GPU training batch; fixed across all stages')
+    parser.add_argument(
+        '--batch', type=int, default=32,
+        help='Per-GPU training batch; fixed across all stages',
+    )
     parser.add_argument('--epochs', type=int, default=120)
     parser.add_argument('--stop', type=int, default=10)
     parser.add_argument('--workers', type=int, default=2)
