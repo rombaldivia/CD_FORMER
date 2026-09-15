@@ -34,6 +34,7 @@ jobs:
         run: |
           python -m py_compile cd_former_official.py
           python -m py_compile scripts/kaggle_train_official.py
+          python -m py_compile scripts/kaggle_train_official_notebook.py
           python -m py_compile tests/test_official_protocol.py
 
       - name: Run official protocol tests
