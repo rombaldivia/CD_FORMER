@@ -26,11 +26,15 @@ The existing loss remains the original batch-level focal-like objective;
 this protocol update does not turn it into per-example focal loss.
 AMP clipping and cosine scheduler stepping are corrected.
 
+When launched by scripts/kaggle_train_official.py, XSUB and XSET receive fixed
+progress-bar positions so both tqdm bars stay visible during dual-GPU training.
+Training and validation bars report cumulative Top-1 accuracy live.
+
 Split definitions:
 https://github.com/kennymckormick/pyskl/blob/main/tools/data/ntu_preproc.py
 """
 
-import os, random, argparse, pickle, hashlib, json, re
+import os, random, argparse, pickle, hashlib, json, re, sys
 from pathlib import Path
 import numpy as np, pandas as pd
 import matplotlib
@@ -211,9 +215,21 @@ def check_resume_config(checkpoint, args):
 
 
 def set_seed(seed=42):
-    random.seed(seed);  np.random.seed(seed)
-    torch.manual_seed(seed);  torch.cuda.manual_seed_all(seed)
+    random.seed(seed); np.random.seed(seed)
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = True
+
+
+def progress_identity(args):
+    """Return a stable tqdm row and display label assigned by the launcher."""
+    raw_position = os.environ.get('CDFORMER_PROGRESS_POSITION', '0')
+    try:
+        position = max(0, int(raw_position))
+    except ValueError:
+        position = 0
+    label = os.environ.get('CDFORMER_PROGRESS_LABEL', args.protocol.upper()).strip()
+    return position, label or args.protocol.upper()
+
 
 def remap_keys(sd: dict) -> dict:
     out = {}
@@ -252,34 +268,38 @@ def reframe_state_dict(state_dict, target_state, allow_reframe=True):
 class MMAction2KeypointDataset(Dataset):
     def __init__(self, pkl_path=None, num_frames=16, jitter=2, is_train=True, samples=None):
         if samples is None:
-            pkl_path = Path(pkl_path);  assert pkl_path.is_file()
-            with open(pkl_path, 'rb') as f: data = pickle.load(f)
+            pkl_path = Path(pkl_path); assert pkl_path.is_file()
+            with open(pkl_path, 'rb') as f:
+                data = pickle.load(f)
             samples = data['annotations']
         self.samples = samples
         self.num_frames, self.jitter = num_frames, jitter
         self.is_train = is_train
         first = self.samples[0]['keypoint']
-        if first.ndim == 4:  first = first[0]
+        if first.ndim == 4:
+            first = first[0]
         self.joints, self.channels = first.shape[1:]
 
-    def __len__(self):  return len(self.samples)
+    def __len__(self):
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        item  = self.samples[idx]
-        kp    = item['keypoint'];  kp = kp[0] if kp.ndim == 4 else kp
+        item = self.samples[idx]
+        kp = item['keypoint']
+        kp = kp[0] if kp.ndim == 4 else kp
         label = item['label']
 
         if self.is_train:
             shift = np.random.randint(-self.jitter, self.jitter + 1)
-            kp    = np.roll(kp, shift, axis=0)
+            kp = np.roll(kp, shift, axis=0)
         # pad / crop
         T = kp.shape[0]
         if T > self.num_frames:
-            s  = (T - self.num_frames) // 2
+            s = (T - self.num_frames) // 2
             kp = kp[s:s+self.num_frames]
         elif T < self.num_frames:
             pad = np.repeat(kp[-1][None, ...], self.num_frames-T, axis=0)
-            kp  = np.concatenate([kp, pad], axis=0)
+            kp = np.concatenate([kp, pad], axis=0)
         # Normalización por frame
         kp = (kp - kp.mean(axis=1, keepdims=True)) / (kp.std(axis=1, keepdims=True) + 1e-5)
         # Flip horizontal aleatorio
@@ -287,18 +307,21 @@ class MMAction2KeypointDataset(Dataset):
             kp[..., 0] *= -1
         return torch.from_numpy(kp).float(), label
 
+
 class GraphormerForHAR(nn.Module):
     def __init__(self, num_joints, seq_len, num_classes=120,
                  d_model=256, num_heads=8, num_layers=6, dropout_p=0.2, in_channels=3):
         super().__init__()
         self.proj = nn.Linear(in_channels, d_model)
-        self.temb = nn.Embedding(seq_len,   d_model)
+        self.temb = nn.Embedding(seq_len, d_model)
         self.jemb = nn.Embedding(num_joints, d_model)
         self.drop = nn.Dropout(dropout_p)
         self.norm = nn.LayerNorm(d_model)
-        enc_layer = nn.TransformerEncoderLayer(d_model, num_heads, dropout=dropout_p, batch_first=True)
-        self.enc  = nn.TransformerEncoder(enc_layer, num_layers)
-        self.cls  = nn.Parameter(torch.randn(1, 1, d_model))
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model, num_heads, dropout=dropout_p, batch_first=True
+        )
+        self.enc = nn.TransformerEncoder(enc_layer, num_layers)
+        self.cls = nn.Parameter(torch.randn(1, 1, d_model))
         self.head = nn.Linear(d_model, num_classes)
 
     def forward(self, x):  # x: (B, T, J, C)
@@ -313,6 +336,7 @@ class GraphormerForHAR(nn.Module):
         avg = x[:, 1:].mean(dim=1)
         return self.head(cls + avg)
 
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=1.5, weight=None):
         super().__init__()
@@ -324,28 +348,45 @@ class FocalLoss(nn.Module):
         pt = torch.exp(-ce)
         return ((1 - pt) ** self.g * ce).mean()
 
+
 @torch.no_grad()
-def validate(model, loader, crit, device, desc='Internal validation', progress=True):
+def validate(model, loader, crit, device, desc='Internal validation', progress=True,
+             position=0, leave=False):
     model.eval()
-    loss = 0.
+    loss = 0.0
     cor = 0
     tot = 0
     preds = []
     gts = []
-    for x, y in tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, disable=not progress):
+    batches = 0
+    pbar = tqdm(
+        loader, desc=desc, leave=leave, position=position,
+        dynamic_ncols=True, disable=not progress, file=sys.stdout,
+    )
+    for x, y in pbar:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        with torch.amp.autocast(device_type=device.type,
-                                dtype=torch.float16,
-                                enabled=device.type == 'cuda'):
+        with torch.amp.autocast(
+            device_type=device.type, dtype=torch.float16, enabled=device.type == 'cuda'
+        ):
             out = model(x)
             l = crit(out, y)
         loss += l.item()
+        batches += 1
         p = out.argmax(1)
         cor += (p == y).sum().item()
         tot += y.size(0)
         preds += p.cpu().tolist()
         gts += y.cpu().tolist()
-    return loss / len(loader), 100 * cor / tot, preds, gts
+        if tot:
+            pbar.set_postfix(
+                loss=f'{loss / batches:.4f}',
+                acc=f'{100.0 * cor / tot:.2f}%',
+                refresh=False,
+            )
+    if not tot:
+        raise ValueError(f'Empty loader during {desc}')
+    return loss / max(batches, 1), 100.0 * cor / tot, preds, gts
+
 
 def main(a):
     if a.epochs < 1 or a.batch < 1 or a.stop < 1 or a.workers < 0 or a.jitter < 0:
@@ -356,7 +397,8 @@ def main(a):
     if a.device == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA was requested but is unavailable. Enable a GPU in Kaggle settings.')
     device = torch.device('cuda' if a.device != 'cpu' and torch.cuda.is_available() else 'cpu')
-    print(f"▶ device: {device}")
+    progress_position, progress_label = progress_identity(a)
+    print(f'▶ device: {device}', flush=True)
 
     # Official outer split FIRST. The held-out official *_val is the test set.
     with open(a.pkl, 'rb') as f:
@@ -364,8 +406,9 @@ def main(a):
     idx_tr, idx_va, idx_te, manifest = make_protocol_split(
         data, a.protocol, a.val_fraction, a.split_seed,
     )
-    ds_full = MMAction2KeypointDataset(num_frames=a.frames, jitter=a.jitter,
-                                     is_train=False, samples=data['annotations'])
+    ds_full = MMAction2KeypointDataset(
+        num_frames=a.frames, jitter=a.jitter, is_train=False, samples=data['annotations']
+    )
     labels = [s['label'] for s in ds_full.samples]
     outdir = Path(a.outdir) if a.outdir else (
         Path('runs') / a.protocol / f'T{a.frames}_seed{a.seed}_split{a.split_seed}'
@@ -383,41 +426,55 @@ def main(a):
         previous = json.loads(manifest_path.read_text(encoding='utf-8'))
         if previous.get('split_sha256') != manifest['split_sha256']:
             raise ValueError('Output directory belongs to a different split. Use a new --outdir.')
-    if not a.check_splits and resume_path is None and (best_path.exists() or (metrics_dir / 'curve.csv').exists()):
-        raise FileExistsError('This output directory already contains a training run. '
-                              'Use a new --outdir to avoid overwriting its results.')
+    if (not a.check_splits and resume_path is None
+            and (best_path.exists() or (metrics_dir / 'curve.csv').exists())):
+        raise FileExistsError(
+            'This output directory already contains a training run. '
+            'Use a new --outdir to avoid overwriting its results.'
+        )
     outdir.mkdir(parents=True, exist_ok=True)
     if not manifest_path.exists():
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-    print(f"▶ protocol: {a.protocol.upper()} | frames: {a.frames}")
-    print(f"▶ official training: {manifest['counts']['official_train']:,}")
-    print(f"▶ official test source: {manifest['official_test_key']}")
-    print(f"▶ output: {outdir.resolve()}")
+    print(f'▶ protocol: {a.protocol.upper()} | frames: {a.frames}', flush=True)
+    print(f"▶ official training: {manifest['counts']['official_train']:,}", flush=True)
+    print(f"▶ official test source: {manifest['official_test_key']}", flush=True)
+    print(f'▶ output: {outdir.resolve()}', flush=True)
 
     # Verificación de clases por split
-    for name, idx in zip(['Train (internal)', 'Validation (internal)', 'Test (official)'],
-                         [idx_tr, idx_va, idx_te]):
-        classes_here = set([labels[i] for i in idx])
-        print(f"{name}: {len(idx):,} samples, {len(classes_here)} classes.")
+    for name, idx in zip(
+        ['Train (internal)', 'Validation (internal)', 'Test (official)'],
+        [idx_tr, idx_va, idx_te],
+    ):
+        classes_here = {labels[i] for i in idx}
+        print(f'{name}: {len(idx):,} samples, {len(classes_here)} classes.', flush=True)
         if len(classes_here) < 120:
-            print(f"⚠️  Advertencia: {name} tiene solo {len(classes_here)} clases de 120 posibles.")
+            print(
+                f'⚠️  Advertencia: {name} tiene solo {len(classes_here)} clases de 120 posibles.',
+                flush=True,
+            )
     if a.check_splits:
         print('✓ Official rules, membership and split isolation validated. No training or test evaluation.')
         return
 
-    ds_train = MMAction2KeypointDataset(num_frames=a.frames, jitter=a.jitter,
-                                      is_train=True, samples=ds_full.samples)
-    loader_options = dict(batch_size=a.batch, num_workers=a.workers,
-                          pin_memory=device.type == 'cuda')
+    ds_train = MMAction2KeypointDataset(
+        num_frames=a.frames, jitter=a.jitter, is_train=True, samples=ds_full.samples
+    )
+    loader_options = dict(
+        batch_size=a.batch, num_workers=a.workers, pin_memory=device.type == 'cuda'
+    )
     dl_tr = DataLoader(Subset(ds_train, idx_tr), shuffle=True, **loader_options)
     dl_va = DataLoader(Subset(ds_full, idx_va), shuffle=False, **loader_options)
     # Construct and iterate the official test loader only after checkpoint selection.
 
-    # Detectar número de canales
     in_channels = ds_full.channels
-
-    class_w = torch.tensor(1. / (np.bincount([labels[i] for i in idx_tr], minlength=120) + 1e-6), dtype=torch.float32, device=device)
-    model = GraphormerForHAR(ds_full.joints, a.frames, 120, a.d_model, a.heads, a.layers, a.dropout, in_channels).to(device)
+    class_w = torch.tensor(
+        1.0 / (np.bincount([labels[i] for i in idx_tr], minlength=120) + 1e-6),
+        dtype=torch.float32,
+        device=device,
+    )
+    model = GraphormerForHAR(
+        ds_full.joints, a.frames, 120, a.d_model, a.heads, a.layers, a.dropout, in_channels
+    ).to(device)
 
     # Every transferred checkpoint must share this protocol and internal holdout.
     source_path = resume_path or a.pretrained
@@ -434,12 +491,16 @@ def main(a):
             checkpoint['state_dict'], model.state_dict(), allow_reframe=resume_path is None,
         )
         incompatible = model.load_state_dict(sd, strict=not reset_temporal)
-        if reset_temporal and (set(incompatible.missing_keys) != {'temb.weight'}
-                               or incompatible.unexpected_keys):
+        if reset_temporal and (
+            set(incompatible.missing_keys) != {'temb.weight'} or incompatible.unexpected_keys
+        ):
             raise ValueError('Unexpected missing parameters while reframing')
-        print(f"🔄 Loaded protocol-matched weights: {source_path}")
+        print(f'🔄 Loaded protocol-matched weights: {source_path}', flush=True)
         if reset_temporal:
-            print(f'▶ Reinitialized temporal embedding for T={a.frames}; other weights transferred.')
+            print(
+                f'▶ Reinitialized temporal embedding for T={a.frames}; other weights transferred.',
+                flush=True,
+            )
         if resume_path is not None:
             best_checkpoint = checkpoint['best_checkpoint']
             check_checkpoint_protocol(best_checkpoint, manifest)
@@ -451,15 +512,19 @@ def main(a):
             # best.pth and last.pth writes; last.pth is the epoch boundary.
             atomic_torch_save(best_checkpoint, best_path)
 
-    (outdir / 'config.json').write_text(json.dumps(vars(a), indent=2) + '\n', encoding='utf-8')
+    (outdir / 'config.json').write_text(
+        json.dumps(vars(a), indent=2) + '\n', encoding='utf-8'
+    )
     crit = FocalLoss(1.5, class_w)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
 
-    if a.scheduler == "onecycle":
+    if a.scheduler == 'onecycle':
         steps_per_epoch = len(dl_tr)
         sched = torch.optim.lr_scheduler.OneCycleLR(
             opt, max_lr=a.lr, total_steps=a.epochs * steps_per_epoch,
-            pct_start=a.warmup_epochs/max(a.epochs,1), div_factor=25.0, final_div_factor=1e4)
+            pct_start=a.warmup_epochs / max(a.epochs, 1),
+            div_factor=25.0, final_div_factor=1e4,
+        )
     else:
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=a.epochs)
 
@@ -486,157 +551,270 @@ def main(a):
         logs = checkpoint['logs']
         start_epoch = checkpoint['epoch'] + 1
         restore_random_state(checkpoint['rng'])
-        print(f'▶ Resuming after completed epoch {checkpoint["epoch"]}; best epoch {best_epoch}.')
+        print(
+            f'▶ Resuming after completed epoch {checkpoint["epoch"]}; best epoch {best_epoch}.',
+            flush=True,
+        )
         if checkpoint.get('training_finished'):
             start_epoch = a.epochs + 1
 
-    metadata = {'protocol': a.protocol, 'split_sha256': manifest['split_sha256'],
-                'frames': a.frames, 'split_seed': a.split_seed, 'val_fraction': a.val_fraction}
+    metadata = {
+        'protocol': a.protocol,
+        'split_sha256': manifest['split_sha256'],
+        'frames': a.frames,
+        'split_seed': a.split_seed,
+        'val_fraction': a.val_fraction,
+    }
 
     for ep in range(start_epoch, a.epochs + 1):
         # Hot-reload LR
         if lr_file.exists() and lr_file.stat().st_mtime != last_mtime:
             try:
                 new_lr = float(lr_file.read_text().strip())
-                for g in opt.param_groups: g['lr'] = new_lr
-                print(f"⚡ LR actualizado → {new_lr:.3e}")
+                for g in opt.param_groups:
+                    g['lr'] = new_lr
+                print(f'⚡ LR actualizado → {new_lr:.3e}', flush=True)
                 last_mtime = lr_file.stat().st_mtime
             except ValueError:
-                print("❌ hyper_lr.txt no contiene número válido")
+                print('❌ hyper_lr.txt no contiene número válido', flush=True)
+
         # Train
         model.train()
-        tot = 0.
-        pbar = tqdm(dl_tr, desc=f'{a.protocol.upper()} T{a.frames} E{ep}/{a.epochs}',
-                    dynamic_ncols=True, disable=a.no_progress)
+        tot = 0.0
+        train_correct = 0
+        train_seen = 0
+        pbar = tqdm(
+            dl_tr,
+            desc=f'{progress_label} | TRAIN T{a.frames} E{ep:03}/{a.epochs}',
+            leave=False,
+            position=progress_position,
+            dynamic_ncols=True,
+            disable=a.no_progress,
+            file=sys.stdout,
+        )
         for x, y in pbar:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             opt.zero_grad()
-            with torch.amp.autocast(device_type=device.type,
-                                    dtype=torch.float16,
-                                    enabled=device.type == 'cuda'):
-                loss = crit(model(x), y)
+            with torch.amp.autocast(
+                device_type=device.type, dtype=torch.float16, enabled=device.type == 'cuda'
+            ):
+                logits = model(x)
+                loss = crit(logits, y)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scale_before = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
+
             tot += loss.item()
-            pbar.set_postfix(loss=f'{loss.item():.4f}', lr=f'{opt.param_groups[0]["lr"]:.2e}')
+            with torch.no_grad():
+                train_correct += (logits.argmax(1) == y).sum().item()
+                train_seen += y.size(0)
+            pbar.set_postfix(
+                loss=f'{loss.item():.4f}',
+                acc=f'{100.0 * train_correct / max(train_seen, 1):.2f}%',
+                lr=f'{opt.param_groups[0]["lr"]:.2e}',
+                refresh=False,
+            )
             if a.scheduler == 'onecycle' and scaler.get_scale() >= scale_before:
                 sched.step()
         if a.scheduler == 'cosine':
             sched.step()
         tl = tot / len(dl_tr)
-        # Val
-        vl, va, preds, gts = validate(model, dl_va, crit, device, progress=not a.no_progress)
+        train_acc = 100.0 * train_correct / max(train_seen, 1)
+
+        # Internal validation only; official test is still untouched here.
+        vl, va, preds, gts = validate(
+            model,
+            dl_va,
+            crit,
+            device,
+            desc=f'{progress_label} | VAL   T{a.frames} E{ep:03}/{a.epochs}',
+            progress=not a.no_progress,
+            position=progress_position,
+            leave=False,
+        )
+
         # Log & ckpt
-        print(f"E{ep:03}/{a.epochs} | Tr {tl:.3f} | Internal val {vl:.3f} | Acc {va:.2f}%")
+        print(
+            f'E{ep:03}/{a.epochs} | Tr {tl:.3f} | Train Acc {train_acc:.2f}% | '
+            f'Internal val {vl:.3f} | Acc {va:.2f}%',
+            flush=True,
+        )
+        # Keep the historical curve schema so pre-fix last.pth checkpoints remain resumable.
         logs.append([ep, tl, vl, va])
-        pd.DataFrame(logs, columns=['epoch', 'train', 'val', 'acc']).to_csv(metrics_dir / 'curve.csv', index=False)
+        pd.DataFrame(logs, columns=['epoch', 'train', 'val', 'acc']).to_csv(
+            metrics_dir / 'curve.csv', index=False
+        )
         if va > best:
             best = va
             best_epoch = ep
             patience = 0
             best_checkpoint = {
-                'state_dict': {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}, 'epoch': ep,
-                'best_internal_val_accuracy': best, 'config': vars(a),
+                'state_dict': {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                },
+                'epoch': ep,
+                'best_internal_val_accuracy': best,
+                'config': vars(a),
                 'protocol_metadata': metadata,
             }
             atomic_torch_save(best_checkpoint, best_path)
         else:
             patience += 1
-            print(f"   patience {patience}/{a.stop}")
+            print(f'   patience {patience}/{a.stop}', flush=True)
         if a.plot_every > 0 and (ep % a.plot_every == 0 or ep == best_epoch):
             cm = confusion_matrix(gts, preds, labels=list(range(120)), normalize='true')
             plt.figure(figsize=(10, 8))
-            sns.heatmap(cm, cmap='YlGnBu', vmin=0, vmax=1, square=True, cbar=True, annot=False)
-            plt.xlabel("Predicción"); plt.ylabel("Etiqueta real")
+            sns.heatmap(
+                cm, cmap='YlGnBu', vmin=0, vmax=1, square=True, cbar=True, annot=False
+            )
+            plt.xlabel('Predicción')
+            plt.ylabel('Etiqueta real')
             plt.tight_layout()
             plt.savefig(metrics_dir / 'internal_val_confmat.png', dpi=250)
             plt.close()
         atomic_torch_save({
-            'state_dict': model.state_dict(), 'epoch': ep, 'best_epoch': best_epoch,
-            'best_internal_val_accuracy': best, 'config': vars(a), 'protocol_metadata': metadata,
-            'optimizer': opt.state_dict(), 'scheduler_state': sched.state_dict(),
-            'scaler': scaler.state_dict(), 'rng': random_state(), 'logs': logs,
+            'state_dict': model.state_dict(),
+            'epoch': ep,
+            'best_epoch': best_epoch,
+            'best_internal_val_accuracy': best,
+            'config': vars(a),
+            'protocol_metadata': metadata,
+            'optimizer': opt.state_dict(),
+            'scheduler_state': sched.state_dict(),
+            'scaler': scaler.state_dict(),
+            'rng': random_state(),
+            'logs': logs,
             'best_checkpoint': best_checkpoint,
-            'patience': patience, 'training_finished': ep == a.epochs or patience >= a.stop,
+            'patience': patience,
+            'training_finished': ep == a.epochs or patience >= a.stop,
         }, last_path)
         if patience >= a.stop:
-            print('⏹ Early stop (internal validation)')
+            print('⏹ Early stop (internal validation)', flush=True)
             break
+
     if a.skip_test:
-        print(f'✓ Checkpoint selected on internal validation: {best_path}')
-        print('▶ Official test was not evaluated (--skip-test).')
+        print(f'✓ Checkpoint selected on internal validation: {best_path}', flush=True)
+        print('▶ Official test was not evaluated (--skip-test).', flush=True)
         return
+
     result_path = metrics_dir / 'official_test.json'
     if result_path.exists() and start_epoch > a.epochs:
         result = json.loads(result_path.read_text(encoding='utf-8'))
-        if (result.get('split_sha256') == manifest['split_sha256']
-                and result.get('checkpoint_epoch') == best_epoch):
-            print(f'✓ Run already completed: official test accuracy {result["official_test_accuracy"]:.4f}%')
+        if (
+            result.get('split_sha256') == manifest['split_sha256']
+            and result.get('checkpoint_epoch') == best_epoch
+        ):
+            print(
+                f'✓ Run already completed: official test accuracy '
+                f'{result["official_test_accuracy"]:.4f}%',
+                flush=True,
+            )
             return
+
     # Only now evaluate the selected checkpoint on this protocol's official test.
     checkpoint = torch.load(best_path, map_location=device, weights_only=True)
     check_checkpoint_protocol(checkpoint, manifest)
     model.load_state_dict(checkpoint['state_dict'])
     dl_te = DataLoader(Subset(ds_full, idx_te), shuffle=False, **loader_options)
-    _, acc, preds, gts = validate(model, dl_te, crit, device,
-                                 desc=f'{a.protocol.upper()} official test', progress=not a.no_progress)
-    print(f"🔬 {a.protocol.upper()} official test accuracy: {acc:.4f}% "
-          f"({len(gts):,} samples; checkpoint epoch {checkpoint['epoch']})")
-    pd.DataFrame(classification_report(gts, preds, labels=list(range(120)),
-                                       output_dict=True, zero_division=0)).T.to_csv(metrics_dir / 'report.csv')
-    pd.DataFrame({'frame_dir': manifest['official_test_ids'], 'label': gts,
-                  'prediction': preds}).to_csv(metrics_dir / 'official_test_predictions.csv', index=False)
+    _, acc, preds, gts = validate(
+        model,
+        dl_te,
+        crit,
+        device,
+        desc=f'{progress_label} | TEST  T{a.frames}',
+        progress=not a.no_progress,
+        position=progress_position,
+        leave=False,
+    )
+    print(
+        f'🔬 {a.protocol.upper()} official test accuracy: {acc:.4f}% '
+        f'({len(gts):,} samples; checkpoint epoch {checkpoint["epoch"]})',
+        flush=True,
+    )
+    pd.DataFrame(
+        classification_report(
+            gts, preds, labels=list(range(120)), output_dict=True, zero_division=0
+        )
+    ).T.to_csv(metrics_dir / 'report.csv')
+    pd.DataFrame({
+        'frame_dir': manifest['official_test_ids'],
+        'label': gts,
+        'prediction': preds,
+    }).to_csv(metrics_dir / 'official_test_predictions.csv', index=False)
     result = {
-        'protocol': a.protocol, 'frames': a.frames, 'seed': a.seed,
-        'split_sha256': manifest['split_sha256'], 'checkpoint_epoch': checkpoint['epoch'],
-        'selection_metric': 'internal_val_accuracy', 'official_test_n': len(gts),
+        'protocol': a.protocol,
+        'frames': a.frames,
+        'seed': a.seed,
+        'split_sha256': manifest['split_sha256'],
+        'checkpoint_epoch': checkpoint['epoch'],
+        'selection_metric': 'internal_val_accuracy',
+        'official_test_n': len(gts),
         'official_test_correct': sum(p == y for p, y in zip(preds, gts)),
         'official_test_accuracy': acc,
     }
     cm = confusion_matrix(gts, preds, labels=list(range(120)), normalize='true')
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm, cmap='YlGnBu', vmin=0, vmax=1, square=True, cbar=True, annot=False)
-    plt.xlabel("Predicción"); plt.ylabel("Etiqueta real")
+    plt.xlabel('Predicción')
+    plt.ylabel('Etiqueta real')
     plt.tight_layout()
     plt.savefig(metrics_dir / 'official_test_confmat.png', dpi=250)
     plt.close()
     result_tmp = result_path.with_suffix('.json.tmp')
     result_tmp.write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
     os.replace(result_tmp, result_path)
-    print(f"📊 saved in {metrics_dir}")
+    print(f'📊 saved in {metrics_dir}', flush=True)
+
 
 if __name__ == '__main__':
     pa = argparse.ArgumentParser()
     pa.add_argument('--pkl', required=True)
     pa.add_argument('--protocol', required=True, choices=['xsub', 'xset'])
-    pa.add_argument('--val-fraction', type=float, default=0.1,
-                    help='Fraction of OFFICIAL TRAIN reserved for internal validation')
-    pa.add_argument('--split-seed', type=int, default=42,
-                    help='Keep fixed across T16/T24/T32 and transferred checkpoints')
+    pa.add_argument(
+        '--val-fraction', type=float, default=0.1,
+        help='Fraction of OFFICIAL TRAIN reserved for internal validation',
+    )
+    pa.add_argument(
+        '--split-seed', type=int, default=42,
+        help='Keep fixed across T16/T24/T32 and transferred checkpoints',
+    )
     pa.add_argument('--seed', type=int, default=42)
     pa.add_argument('--outdir', default='', help='Default: runs/PROTOCOL/Tn_seedN_splitN')
     pa.add_argument('--workers', type=int, default=4)
     pa.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
     pa.add_argument('--no-progress', action='store_true')
-    pa.add_argument('--plot-every', type=int, default=5, help='Validation confusion-matrix interval; 0 disables')
-    pa.add_argument('--check-splits', action='store_true', help='Validate split and exit before training')
-    pa.add_argument('--skip-test', action='store_true', help='Do not evaluate official test after training')
-    pa.add_argument('--pretrained', default='', help='Same-protocol weights; supports temporal reframing')
-    pa.add_argument('--resume', nargs='?', const='auto', default='',
-                    help='Full-state last.pth path, or auto to resume this output directory when available')
-    pa.add_argument('--frames',  type=int, default=16, choices=[16, 24, 32])
-    pa.add_argument('--jitter',  type=int, default=2)
-    pa.add_argument('--batch',   type=int, default=90)
-    pa.add_argument('--epochs',  type=int, default=120)
-    pa.add_argument('--stop',    type=int, default=10)
-    pa.add_argument('--lr',      type=float, default=5e-5)
+    pa.add_argument(
+        '--plot-every', type=int, default=5,
+        help='Validation confusion-matrix interval; 0 disables',
+    )
+    pa.add_argument(
+        '--check-splits', action='store_true',
+        help='Validate split and exit before training',
+    )
+    pa.add_argument(
+        '--skip-test', action='store_true',
+        help='Do not evaluate official test after training',
+    )
+    pa.add_argument(
+        '--pretrained', default='',
+        help='Same-protocol weights; supports temporal reframing',
+    )
+    pa.add_argument(
+        '--resume', nargs='?', const='auto', default='',
+        help='Full-state last.pth path, or auto to resume this output directory when available',
+    )
+    pa.add_argument('--frames', type=int, default=16, choices=[16, 24, 32])
+    pa.add_argument('--jitter', type=int, default=2)
+    pa.add_argument('--batch', type=int, default=90)
+    pa.add_argument('--epochs', type=int, default=120)
+    pa.add_argument('--stop', type=int, default=10)
+    pa.add_argument('--lr', type=float, default=5e-5)
     pa.add_argument('--d_model', type=int, default=192)
-    pa.add_argument('--heads',   type=int, default=6)
-    pa.add_argument('--layers',  type=int, default=8)
+    pa.add_argument('--heads', type=int, default=6)
+    pa.add_argument('--layers', type=int, default=8)
     pa.add_argument('--dropout', type=float, default=0.25)
     pa.add_argument('--scheduler', default='cosine', choices=['cosine', 'onecycle'])
     pa.add_argument('--warmup_epochs', type=int, default=3)
