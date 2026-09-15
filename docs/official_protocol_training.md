@@ -70,13 +70,34 @@ python scripts/kaggle_train_official.py \
   --d_model 192 --heads 6 --layers 8
 ```
 
-With two visible GPUs, XSUB and XSET run concurrently. With one, they run
-sequentially. Every protocol first trains T16 from scratch. T24 and T32 each
-load that same protocol's selected T16 checkpoint; only the resized temporal
-embedding is reinitialized before further training. The architecture and
-internal split must match. `--initialization scratch` instead trains each T
-independently. Set `--pkl /exact/path/ntu120_3danno.pkl` if discovery finds zero
-or multiple annotation files.
+At startup the launcher prints PyTorch's CUDA inventory. A normal dual-T4 run
+should report two visible devices. If it reports `visible devices: 0`, the
+notebook session has no CUDA accelerator exposed to PyTorch; select the Kaggle
+GPU accelerator (T4 x2 for parallel XSUB/XSET) and restart the session before
+running the command again.
+
+With two visible GPUs, XSUB and XSET run concurrently. Their tqdm rows are pinned
+independently, so the notebook can show both live at once, for example:
+
+```text
+XSUB GPU0 | TRAIN T16 E001/120 ... loss=... acc=... lr=...
+XSET GPU1 | TRAIN T16 E001/120 ... loss=... acc=... lr=...
+```
+
+The training `acc` value is cumulative Top-1 accuracy over the batches processed
+so far in the current epoch. During internal validation the same protocol row is
+reused and reports cumulative validation Top-1 accuracy. These live values are
+monitoring only; checkpoint selection still uses the completed internal-validation
+accuracy, and the official test partition remains untouched until training and
+checkpoint selection are finished.
+
+With one visible GPU, XSUB and XSET run sequentially. Every protocol first trains
+T16 from scratch. T24 and T32 each load that same protocol's selected T16
+checkpoint; only the resized temporal embedding is reinitialized before further
+training. The architecture and internal split must match. `--initialization
+scratch` instead trains each T independently. Set `--pkl
+/exact/path/ntu120_3danno.pkl` if discovery finds zero or multiple annotation
+files.
 
 Each run evaluates official test after its own training completes. No official
 test metric controls the launcher or selects another frame length. Use
