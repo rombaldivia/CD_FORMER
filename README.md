@@ -10,6 +10,35 @@
 
 ---
 
+## Official-protocol training on Kaggle
+
+The current training entrypoint is [`cd_former_official.py`](cd_former_official.py).
+It selects the official NTU120 **XSUB or XSET split first**, then holds out 10%
+of that protocol's training partition for internal validation. PySKL's
+`xsub_val` and `xset_val` are the **official test partitions**; they are used
+only after checkpoint selection on internal validation.
+
+```bash
+python scripts/kaggle_train_official.py \
+  --protocols xsub xset --frames 16 24 32 \
+  --initialization reframe --batch 32 --epochs 120 --stop 10
+```
+
+The Kaggle launcher detects an attached `ntu120_3danno.pkl`, uses separate GPUs
+for XSUB and XSET when available, and resumes each run from its last completed
+epoch. Within each protocol, T24 and T32 independently transfer the corresponding
+T16 weights and reinitialize only the temporal embedding. Model defaults follow
+the supplied trainer: **dimension 192, 6 heads, 8 layers**. These differ from the
+historical evaluation defaults documented below. The Kaggle batch defaults to
+32 per GPU; the supplied trainer's original batch default was 90.
+
+See [the training guide](docs/official_protocol_training.md) for individual runs,
+split checks, checkpoint recovery, exact settings and verification limits.
+The legacy fine-tuning and evaluation scripts are retained for historical use;
+the new Kaggle launcher uses the official-protocol entrypoint above.
+
+---
+
 ## Research Overview
 
 **CD-Former** is a pure-Transformer framework for skeleton-based Human Action Recognition (HAR). It represents 3D joint sequences as compact spatiotemporal tokens and models motion through **Contextual Dynamic Self-Attention**, allowing temporal progression and joint-level dependencies to be learned within a unified attention architecture.
