@@ -3,7 +3,7 @@ PolyForm Noncommercial License 1.0.0
 Copyright (c) 2026 Romel Antonio Baldivia Calderon de la Barca.
 All rights reserved except as expressly granted below.
 
-This software, including the CD-Former source code, model architecture, training and evaluation scripts, documentation, visual assets, and released model checkpoints, is licensed for noncommercial use under the PolyForm Noncommercial License 1.0.0.
+This software, including the CD-Former source code, model architecture, training and evaluation scripts, documentation, and visual assets, is licensed for noncommercial use under the PolyForm Noncommercial License 1.0.0. Trained model weights are not distributed in this public repository.
 
 Official license text:
 https://polyformproject.org/licenses/noncommercial/1.0.0/
