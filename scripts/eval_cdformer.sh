@@ -1,59 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== CD-Former manuscript-aligned evaluation ==="
+# Evaluate the six NTU RGB+D 120 protocol/frame checkpoints used by the paper.
+# Each checkpoint is evaluated only on the protocol for which it was trained.
+#
+# Required environment variables:
+#   WEIGHTS_XSUB_16  WEIGHTS_XSUB_24  WEIGHTS_XSUB_32
+#   WEIGHTS_XSET_16  WEIGHTS_XSET_24  WEIGHTS_XSET_32
 
 CODE_DIR="${CODE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
-DATA_DIR="${DATA_DIR:-/data/nturgbd}"
-RESULTS_DIR="${RESULTS_DIR:-./results}"
-PKL_PATH="${PKL_PATH:-$DATA_DIR/ntu120_3danno.pkl}"
-SCRIPT_PATH="${SCRIPT_PATH:-$CODE_DIR/graphormer_frames_reset_eval.py}"
+PKL_PATH="${PKL_PATH:-/data/nturgbd/ntu120_3danno.pkl}"
+RESULTS_DIR="${RESULTS_DIR:-$CODE_DIR/results}"
 DEVICE="${DEVICE:-cpu}"
 BATCH="${BATCH:-32}"
 
-mkdir -p "$DATA_DIR" "$RESULTS_DIR"
-
-if [ ! -f "$PKL_PATH" ]; then
-  echo "Downloading NTU RGB+D 120 annotation file..."
-  wget -O "$PKL_PATH" \
-    https://download.openmmlab.com/mmaction/pyskl/data/nturgbd/ntu120_3danno.pkl
-fi
-
-if [ ! -f "$SCRIPT_PATH" ]; then
-  echo "ERROR: evaluation script not found at $SCRIPT_PATH"
+if [[ ! -f "$PKL_PATH" ]]; then
+  echo "ERROR: ntu120_3danno.pkl not found: $PKL_PATH"
+  echo "Set PKL_PATH to the local PySKL NTU RGB+D 120 annotation file."
   exit 1
 fi
 
-for FRAMES in 16 24 32; do
-  VAR="WEIGHTS_${FRAMES}"
-  WEIGHTS_PATH="${!VAR:-}"
+mkdir -p "$RESULTS_DIR"
 
-  if [ -z "$WEIGHTS_PATH" ]; then
-    echo "ERROR: $VAR is not set."
-    echo "Public model weights are intentionally not distributed in this repository."
-    echo "Provide the local checkpoint corresponding to each temporal configuration."
-    exit 1
-  fi
-  if [ ! -f "$WEIGHTS_PATH" ]; then
-    echo "ERROR: local checkpoint not found: $WEIGHTS_PATH"
-    exit 1
-  fi
+for PROTOCOL in xsub xset; do
+  UPPER_PROTOCOL="${PROTOCOL^^}"
 
-  echo "=== Evaluating ${FRAMES} frames ==="
-  python "$SCRIPT_PATH" \
-    --pkl "$PKL_PATH" \
-    --weights "$WEIGHTS_PATH" \
-    --val_xsub xsub_val \
-    --val_xset xset_val \
-    --frames "$FRAMES" \
-    --d_model 192 \
-    --heads 8 \
-    --layers 12 \
-    --batch "$BATCH" \
-    --device "$DEVICE" \
-    --num_workers 2 \
-    --outdir "$RESULTS_DIR/metrics_eval_${FRAMES}f"
+  for FRAMES in 16 24 32; do
+    VAR="WEIGHTS_${UPPER_PROTOCOL}_${FRAMES}"
+    WEIGHTS_PATH="${!VAR:-}"
+
+    if [[ -z "$WEIGHTS_PATH" ]]; then
+      echo "ERROR: $VAR is not set."
+      exit 1
+    fi
+    if [[ ! -f "$WEIGHTS_PATH" ]]; then
+      echo "ERROR: checkpoint not found: $WEIGHTS_PATH"
+      exit 1
+    fi
+
+    echo "=== ${UPPER_PROTOCOL} | T=${FRAMES} ==="
+
+    python "$CODE_DIR/graphormer_frames_reset_eval.py"       --pkl "$PKL_PATH"       --weights "$WEIGHTS_PATH"       --protocol "$PROTOCOL"       --frames "$FRAMES"       --d-model 192       --heads 8       --layers 12       --d-ff 2048       --dropout 0.15       --batch "$BATCH"       --device "$DEVICE"       --outdir "$RESULTS_DIR/${PROTOCOL}_T${FRAMES}"
+  done
 done
 
-echo "=== Evaluation finished ==="
-echo "Results saved under: $RESULTS_DIR"
+echo "Evaluation complete: $RESULTS_DIR"
