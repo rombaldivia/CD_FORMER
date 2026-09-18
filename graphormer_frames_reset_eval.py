@@ -5,7 +5,7 @@ CD-Former evaluation script for NTU RGB+D 120 skeleton-based HAR.
 
 This script evaluates a trained CD-Former checkpoint on xsub and xset validation splits.
 It reports Top-1/Top-5 accuracy, recall, F1-score, balanced accuracy, Cohen's kappa,
-Matthews correlation coefficient, GFLOPs, FPS, latency, RAM/VRAM usage, classification
+Matthews correlation coefficient, analytical GFLOPs, throughput, latency, RAM/VRAM usage, classification
 reports, and normalized confusion matrices.
 """
 
@@ -155,9 +155,9 @@ def validate(model, loader, device):
         y_pred.extend(pred.cpu().numpy())
         y_prob.extend(prob.cpu().numpy())
     elapsed = time.time() - start
-    fps = len(y_true) * loader.dataset.num_frames / max(elapsed, 1e-8)
+    throughput = len(y_true) / max(elapsed, 1e-8)
     latency = elapsed / max(len(y_true), 1) * 1000
-    return np.array(y_true), np.array(y_pred), np.array(y_prob), fps, latency
+    return np.array(y_true), np.array(y_pred), np.array(y_prob), throughput, latency
 
 
 def main(args):
@@ -185,16 +185,18 @@ def main(args):
     ).to(device)
     load_checkpoint(model, args.weights, device, args.frames)
 
-    try:
-        from thop import profile
-        dummy_input = torch.randn(1, args.frames, 25, 3).to(device)
-        flops, params = profile(model, inputs=(dummy_input,), verbose=False)
-        gflops = flops / 1e9
-        params_m = params / 1e6
-        print(f"GFLOPs: {gflops:.2f} | Params: {params_m:.2f}M")
-    except Exception as exc:
-        print(f"[Warning] GFLOPs could not be estimated: {exc}")
-        gflops, params_m = 0.0, 0.0
+    # Manuscript-aligned analytical complexity convention:
+    # principal Transformer matrix operations, with 1 MAC = 2 FLOPs.
+    J, C, d, d_ff, L, K = 25, 3, args.d_model, 2048, args.layers, args.num_classes
+    M = args.frames * J + 1
+    macs = (
+        args.frames * J * C * d
+        + L * (4 * M * d * d + 2 * M * M * d + 2 * M * d * d_ff)
+        + d * K
+    )
+    gflops = 2 * macs / 1e9
+    params_m = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"Analytical GFLOPs: {gflops:.2f} | Params: {params_m:.2f}M")
 
     outdir = Path(args.outdir)
     outdir.mkdir(exist_ok=True, parents=True)
@@ -211,7 +213,7 @@ def main(args):
             num_workers=args.num_workers,
             pin_memory=use_cuda,
         )
-        y_true, y_pred, y_prob, fps, latency = validate(model, loader, device)
+        y_true, y_pred, y_prob, throughput, latency = validate(model, loader, device)
 
         recall = recall_score(y_true, y_pred, average="macro", zero_division=0) * 100
         f1 = f1_score(y_true, y_pred, average="macro", zero_division=0) * 100
@@ -224,7 +226,7 @@ def main(args):
 
         print(f"Frames {args.frames} | Recall {recall:.2f}% | F1 {f1:.2f}% | Top1/5 {top1:.2f}/{top5:.2f}%")
         print(f"Balanced Acc {balanced_acc:.2f}% | Kappa/Matthews {kappa:.2f}/{matthews:.2f}%")
-        print(f"FPS {fps:.2f} | Latency {latency:.1f} ms | RAM/VRAM {ram}/{vram}")
+        print(f"Throughput {throughput:.2f} samples/s | Latency {latency:.1f} ms | RAM/VRAM {ram}/{vram}")
 
         report = pd.DataFrame(classification_report(y_true, y_pred, output_dict=True, zero_division=0)).T
         report.to_csv(outdir / f"report_{name}.csv", index=True)
@@ -242,7 +244,7 @@ def main(args):
             "Matthews": f"{matthews:.2f}%",
             "GFLOPs": f"{gflops:.2f}",
             "Params(M)": f"{params_m:.2f}",
-            "FPS": round(fps, 2),
+            "Throughput(samples/s)": round(throughput, 2),
             "Latency(ms)": round(latency, 1),
             "RAM/VRAM(GB)": f"{ram}/{vram}",
         }
