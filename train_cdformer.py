@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-CD-Former training on NTU RGB+D 120.
+"""Train CD-Former on NTU RGB+D 120.
 
-Protocol split names in the PySKL ntu120_3danno.pkl file:
-  - XSUB: xsub_train -> optimization, xsub_val -> protocol evaluation
-  - XSET: xset_train -> optimization, xset_val -> protocol evaluation
-
-Defaults match the manuscript reference configuration:
-d_model=192, heads=8, layers=12, FFN=2048, dropout=0.15,
-AdamW(lr=8e-3, weight_decay=0.1), label smoothing=0.1,
-temporal token dropout=0.2, temporal jitter=6, effective batch=400,
-200 epochs, patience=30, cosine annealing.
-
-The two-stage head-reset procedure is supported by first training a checkpoint,
-then launching a second run with --init-checkpoint and --reset-head. When
---reset-head is used, the first --freeze-layers encoder layers are frozen for
---unfreeze-epoch completed epochs and then unfrozen.
-
-Trained checkpoints are written only to the requested output directory and are
-not part of the public repository.
+XSUB uses xsub_train/xsub_val and XSET uses xset_train/xset_val from the
+PySKL annotation file. Defaults match the configuration reported in the paper.
 """
 
 import argparse
@@ -77,8 +61,7 @@ class NTU120Dataset(Dataset):
         sample = self.annotations[self.indices[item]]
         kp = np.asarray(sample["keypoint"], dtype=np.float32)
 
-        # PySKL NTU keypoints may contain a body dimension (M,T,V,C).
-        # The manuscript input representation uses the first indexed stream.
+        # PySKL stores people as the leading dimension; CD-Former uses the first stream.
         if kp.ndim == 4:
             kp = kp[0]
         if kp.ndim != 3 or kp.shape[-1] != 3:
@@ -86,17 +69,17 @@ class NTU120Dataset(Dataset):
 
         kp = self._fixed_window(kp)
 
-        # Temporal jitter: one random circular shift for the clip.
+        # Random temporal shift used during training.
         if self.training and self.temporal_jitter > 0:
             delta = random.randint(-self.temporal_jitter, self.temporal_jitter)
             kp = np.roll(kp, shift=delta, axis=0)
 
-        # Frame-wise z-score over joints, independently for x/y/z.
+        # Normalize each frame over joints.
         mean = kp.mean(axis=1, keepdims=True)
         std = kp.std(axis=1, keepdims=True)
         kp = (kp - mean) / (std + 1e-5)
 
-        # Temporal token dropout: mask complete temporal positions.
+        # Drop complete temporal positions.
         if self.training and self.temporal_dropout > 0:
             n_drop = int(math.floor(self.temporal_dropout * self.frames))
             if n_drop > 0:
@@ -525,7 +508,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=30)
 
-    # Kaggle-friendly gradient accumulation: 20 x 20 = effective batch 400.
+    # Default accumulation gives an effective batch size of 400.
     parser.add_argument("--micro-batch", type=int, default=20)
     parser.add_argument("--accumulation-steps", type=int, default=20)
     parser.add_argument("--eval-batch", type=int, default=32)
