@@ -176,17 +176,3 @@ Additional figures used in the paper are available in `assets/figures/`.
 
 ![Attention examples](assets/figures/cdformer_attention_examples.png)
 
-## Citation
-
-```bibtex
-@article{baldivia2026cdformer,
-  title  = {CD-Former: A Contextual Dynamic Transformer for Skeleton-Based Human Action Recognition},
-  author = {Baldivia Calderon de la Barca, Romel Antonio and others},
-  year   = {2026},
-  note   = {Manuscript under peer review}
-}
-```
-
-## License
-
-See [LICENSE](LICENSE).
