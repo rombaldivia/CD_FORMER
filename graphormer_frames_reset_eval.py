@@ -1,12 +1,20 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CD-Former evaluation script for NTU RGB+D 120 skeleton-based HAR.
+Protocol-specific CD-Former evaluation for NTU RGB+D 120.
 
-This script evaluates a trained CD-Former checkpoint on xsub and xset validation splits.
-It reports Top-1/Top-5 accuracy, recall, F1-score, balanced accuracy, Cohen's kappa,
-Matthews correlation coefficient, analytical GFLOPs, throughput, latency, RAM/VRAM usage, classification
-reports, and normalized confusion matrices.
+This file imports the public CDFormer implementation from train_cdformer.py so
+training and evaluation use exactly the same architecture. It does not redefine
+or alter the model.
+
+A checkpoint is evaluated only on its matching protocol partition:
+  XSUB -> xsub_val
+  XSET -> xset_val
+
+Accepted checkpoint formats:
+  1) checkpoints produced by train_cdformer.py (key: "model")
+  2) dictionaries containing "state_dict"
+  3) raw PyTorch state dictionaries
 """
 
 import argparse
@@ -21,7 +29,6 @@ import numpy as np
 import pandas as pd
 import psutil
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import (
     balanced_accuracy_score,
@@ -32,6 +39,8 @@ from sklearn.metrics import (
     matthews_corrcoef,
     recall_score,
 )
+
+from train_cdformer import CDFormer, NTU120Dataset
 
 
 def cpu_mem():
@@ -49,7 +58,7 @@ def gpu_mem():
 def top5_acc(y_true, probas):
     top5 = np.argsort(probas, axis=1)[:, -5:]
     correct = sum(y_true[i] in top5[i] for i in range(len(y_true)))
-    return 100 * correct / len(y_true)
+    return 100.0 * correct / max(len(y_true), 1)
 
 
 def set_seed(seed=42):
@@ -60,134 +69,166 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
-class MMAction2KeypointDataset(torch.utils.data.Dataset):
-    def __init__(self, data, idx_list, num_frames=16):
-        self.samples = [data["annotations"][i] for i in idx_list]
-        self.num_frames = num_frames
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-        kp = sample["keypoint"]
-        if kp.ndim == 4:
-            kp = kp[0]
-        label = sample["label"]
-        T = kp.shape[0]
-        if T > self.num_frames:
-            start = (T - self.num_frames) // 2
-            kp = kp[start:start + self.num_frames]
-        elif T < self.num_frames:
-            pad = np.repeat(kp[-1][None], self.num_frames - T, axis=0)
-            kp = np.concatenate([kp, pad], axis=0)
-        kp = (kp - kp.mean(axis=1, keepdims=True)) / (kp.std(axis=1, keepdims=True) + 1e-5)
-        return torch.from_numpy(kp).float(), label
-
-
-class GraphormerForHAR(nn.Module):
-    def __init__(self, num_joints, seq_len, num_classes=120,
-                 d_model=192, num_heads=8, num_layers=12, dropout_p=0.0):
-        super().__init__()
-        self.proj = nn.Linear(3, d_model)
-        self.temb = nn.Embedding(seq_len, d_model)
-        self.jemb = nn.Embedding(num_joints, d_model)
-        self.drop = nn.Dropout(dropout_p)
-        self.norm = nn.LayerNorm(d_model)
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=num_heads,
-            dropout=dropout_p,
-            batch_first=True,
-        )
-        self.enc = nn.TransformerEncoder(layer, num_layers)
-        self.cls = nn.Parameter(torch.randn(1, 1, d_model))
-        self.head = nn.Linear(d_model, num_classes)
-
-    def forward(self, x):
-        B, T, J, C = x.shape
-        x = self.proj(x)
-        x = x + self.temb(torch.arange(T, device=x.device)).unsqueeze(1)
-        x = x + self.jemb(torch.arange(J, device=x.device))
-        x = self.norm(self.drop(x.reshape(B, T * J, -1)))
-        x = torch.cat([self.cls.expand(B, -1, -1), x], dim=1)
-        x = self.enc(x)
-        cls = x[:, 0]
-        avg = x[:, 1:].mean(1)
-        return self.head(cls + avg)
-
-
 def ids_to_idx(data, split_key, bad_ids):
     if split_key not in data["split"]:
-        raise ValueError(f"Split '{split_key}' was not found in the annotation file.")
-    wanted = set(data["split"][split_key])
-    return [
-        i for i, sample in enumerate(data["annotations"])
-        if sample["frame_dir"] in wanted and sample["frame_dir"] not in bad_ids
+        raise ValueError(f"Split {split_key!r} was not found in the annotation file.")
+
+    index = {}
+    for i, sample in enumerate(data["annotations"]):
+        frame_dir = sample.get("frame_dir")
+        if frame_dir is None:
+            raise ValueError(f"Annotation {i} has no frame_dir")
+        if frame_dir in index:
+            raise ValueError(f"Duplicate frame_dir: {frame_dir}")
+        index[frame_dir] = i
+
+    wanted = data["split"][split_key]
+    missing = [name for name in wanted if name not in index]
+    if missing:
+        raise ValueError(
+            f"{split_key} contains missing annotations; first IDs: {missing[:3]}"
+        )
+
+    return [index[name] for name in wanted if name not in bad_ids]
+
+
+def extract_state_dict(raw):
+    if isinstance(raw, dict) and "model" in raw:
+        state = raw["model"]
+    elif isinstance(raw, dict) and "state_dict" in raw:
+        state = raw["state_dict"]
+    else:
+        state = raw
+
+    if not isinstance(state, dict):
+        raise TypeError("Checkpoint does not contain a valid model state dictionary.")
+
+    return {k.removeprefix("module."): v for k, v in state.items()}
+
+
+def load_checkpoint(model, path, device, protocol, frames):
+    raw = torch.load(path, map_location=device)
+
+    if isinstance(raw, dict):
+        config = raw.get("config")
+        if isinstance(config, dict):
+            ckpt_protocol = config.get("protocol")
+            ckpt_frames = config.get("frames")
+
+            if ckpt_protocol is not None and ckpt_protocol != protocol:
+                raise ValueError(
+                    f"Protocol mismatch: checkpoint={ckpt_protocol}, "
+                    f"requested={protocol}"
+                )
+            if ckpt_frames is not None and int(ckpt_frames) != int(frames):
+                raise ValueError(
+                    f"Frame mismatch: checkpoint={ckpt_frames}, requested={frames}"
+                )
+
+    state = extract_state_dict(raw)
+    base = model.state_dict()
+
+    missing = [k for k in base if k not in state]
+    unexpected = [k for k in state if k not in base]
+    shape_mismatch = [
+        k for k in base
+        if k in state and tuple(base[k].shape) != tuple(state[k].shape)
     ]
 
+    if missing or unexpected or shape_mismatch:
+        raise RuntimeError(
+            "Checkpoint does not exactly match the current CD-Former architecture. "
+            f"Missing={missing[:5]}, unexpected={unexpected[:5]}, "
+            f"shape_mismatch={shape_mismatch[:5]}"
+        )
 
-def load_checkpoint(model, path, device, frames):
-    raw = torch.load(path, map_location=device)
-    state_dict = raw.get("state_dict", raw) if isinstance(raw, dict) else raw
-    if "temb.weight" in state_dict and state_dict["temb.weight"].shape[0] != frames:
-        print(f"Reset temporal embedding: {state_dict['temb.weight'].shape[0]} -> {frames}")
-        del state_dict["temb.weight"]
-    base = model.state_dict()
-    filtered = {k: v for k, v in state_dict.items() if k in base and v.shape == base[k].shape}
-    print(f"Loading {len(filtered)}/{len(base)} matching layers ({len(filtered) / len(base) * 100:.1f}%)")
-    model.load_state_dict(filtered, strict=False)
+    model.load_state_dict(state, strict=True)
+    print(f"Loaded checkpoint: {path}")
+    print(f"Verified {len(base)}/{len(base)} model tensors.")
 
 
 @torch.no_grad()
 def validate(model, loader, device):
     model.eval()
     y_true, y_pred, y_prob = [], [], []
-    start = time.time()
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    start = time.perf_counter()
+
     for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
-        with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+
+        with torch.amp.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=device.type == "cuda",
+        ):
             logits = model(x)
+
         prob = F.softmax(logits, dim=1)
         pred = prob.argmax(1)
+
         y_true.extend(y.cpu().numpy())
         y_pred.extend(pred.cpu().numpy())
         y_prob.extend(prob.cpu().numpy())
-    elapsed = time.time() - start
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elapsed = time.perf_counter() - start
+
     throughput = len(y_true) / max(elapsed, 1e-8)
-    latency = elapsed / max(len(y_true), 1) * 1000
-    return np.array(y_true), np.array(y_pred), np.array(y_prob), throughput, latency
+    latency = elapsed / max(len(y_true), 1) * 1000.0
+
+    return (
+        np.asarray(y_true),
+        np.asarray(y_pred),
+        np.asarray(y_prob),
+        throughput,
+        latency,
+    )
 
 
 def main(args):
-    set_seed(42)
-    use_cuda = args.device == "cuda" and torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
-    print(f"Device: {device}")
+    set_seed(args.seed)
 
-    with open(args.pkl, "rb") as f:
-        data = pickle.load(f)
+    use_cuda = args.device == "cuda" and torch.cuda.is_available()
+    if args.device == "cuda" and not use_cuda:
+        raise RuntimeError("CUDA requested but no CUDA device is available.")
+    device = torch.device("cuda" if use_cuda else "cpu")
+
+    with open(args.pkl, "rb") as handle:
+        data = pickle.load(handle)
 
     bad_ids = set()
     if args.missing_txt:
-        with open(args.missing_txt) as f:
-            bad_ids = {line.strip() for line in f if line.strip()}
+        with open(args.missing_txt, encoding="utf-8") as handle:
+            bad_ids = {line.strip() for line in handle if line.strip()}
 
-    model = GraphormerForHAR(
-        num_joints=25,
+    # Preserve the exact public architecture from train_cdformer.py.
+    model = CDFormer(
         seq_len=args.frames,
-        num_classes=args.num_classes,
+        num_joints=25,
+        num_classes=120,
         d_model=args.d_model,
-        num_heads=args.heads,
-        num_layers=args.layers,
-        dropout_p=args.dropout,
+        heads=args.heads,
+        layers=args.layers,
+        dropout=args.dropout,
+        d_ff=args.d_ff,
     ).to(device)
-    load_checkpoint(model, args.weights, device, args.frames)
 
-    # Manuscript-aligned analytical complexity convention:
-    # principal Transformer matrix operations, with 1 MAC = 2 FLOPs.
-    J, C, d, d_ff, L, K = 25, 3, args.d_model, 2048, args.layers, args.num_classes
+    load_checkpoint(
+        model,
+        args.weights,
+        device,
+        protocol=args.protocol,
+        frames=args.frames,
+    )
+
+    # Same analytical convention used in the manuscript.
+    J, C, K = 25, 3, 120
+    d, d_ff, L = args.d_model, args.d_ff, args.layers
     M = args.frames * J + 1
     macs = (
         args.frames * J * C * d
@@ -196,89 +237,118 @@ def main(args):
     )
     gflops = 2 * macs / 1e9
     params_m = sum(p.numel() for p in model.parameters()) / 1e6
+
+    split_key = f"{args.protocol}_val"
+    indices = ids_to_idx(data, split_key, bad_ids)
+    dataset = NTU120Dataset(
+        data["annotations"],
+        indices,
+        frames=args.frames,
+        training=False,
+    )
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=use_cuda,
+        persistent_workers=args.num_workers > 0,
+    )
+
+    print(f"Device: {device}")
+    print(f"Protocol: {args.protocol.upper()}")
+    print(f"Split: {split_key} ({len(dataset)} samples)")
+    print(f"Frames: {args.frames}")
     print(f"Analytical GFLOPs: {gflops:.2f} | Params: {params_m:.2f}M")
+
+    y_true, y_pred, y_prob, throughput, latency = validate(
+        model, loader, device
+    )
+
+    recall = recall_score(y_true, y_pred, average="macro", zero_division=0) * 100
+    f1 = f1_score(y_true, y_pred, average="macro", zero_division=0) * 100
+    top1 = (y_true == y_pred).mean() * 100
+    top5 = top5_acc(y_true, y_prob)
+    balanced_acc = balanced_accuracy_score(y_true, y_pred) * 100
+    kappa = cohen_kappa_score(y_true, y_pred) * 100
+    matthews = matthews_corrcoef(y_true, y_pred) * 100
+    ram, vram = cpu_mem(), gpu_mem()
+
+    print(
+        f"Recall {recall:.2f}% | F1 {f1:.2f}% | "
+        f"Top1/5 {top1:.2f}/{top5:.2f}%"
+    )
+    print(
+        f"Balanced Acc {balanced_acc:.2f}% | "
+        f"Kappa/Matthews {kappa:.2f}/{matthews:.2f}%"
+    )
+    print(
+        f"Throughput {throughput:.2f} samples/s | "
+        f"Latency {latency:.1f} ms/sample | RAM/VRAM {ram}/{vram}"
+    )
 
     outdir = Path(args.outdir)
     outdir.mkdir(exist_ok=True, parents=True)
-    splits = {"xsub": args.val_xsub, "xset": args.val_xset}
-    summaries = []
 
-    for name, split_key in splits.items():
-        print(f"\n===== Evaluating {name.upper()} ({split_key}) =====")
-        idxs = ids_to_idx(data, split_key, bad_ids)
-        dataset = MMAction2KeypointDataset(data, idxs, args.frames)
-        loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=args.batch,
-            num_workers=args.num_workers,
-            pin_memory=use_cuda,
+    report = pd.DataFrame(
+        classification_report(
+            y_true, y_pred, output_dict=True, zero_division=0
         )
-        y_true, y_pred, y_prob, throughput, latency = validate(model, loader, device)
+    ).T
+    report.to_csv(outdir / f"report_{args.protocol}.csv", index=True)
 
-        recall = recall_score(y_true, y_pred, average="macro", zero_division=0) * 100
-        f1 = f1_score(y_true, y_pred, average="macro", zero_division=0) * 100
-        top1 = (y_true == y_pred).mean() * 100
-        top5 = top5_acc(y_true, y_prob)
-        balanced_acc = balanced_accuracy_score(y_true, y_pred) * 100
-        kappa = cohen_kappa_score(y_true, y_pred) * 100
-        matthews = matthews_corrcoef(y_true, y_pred) * 100
-        ram, vram = cpu_mem(), gpu_mem()
+    summary = {
+        "Protocol": args.protocol,
+        "Split": split_key,
+        "Frames": args.frames,
+        "Samples": len(dataset),
+        "Recall": f"{recall:.2f}%",
+        "F1": f"{f1:.2f}%",
+        "Top-1": f"{top1:.2f}%",
+        "Top-5": f"{top5:.2f}%",
+        "Balanced Accuracy": f"{balanced_acc:.2f}%",
+        "Kappa": f"{kappa:.2f}%",
+        "Matthews": f"{matthews:.2f}%",
+        "GFLOPs": f"{gflops:.2f}",
+        "Params(M)": f"{params_m:.2f}",
+        "Throughput(samples/s)": round(throughput, 2),
+        "Latency(ms/sample)": round(latency, 1),
+        "RAM/VRAM(GB)": f"{ram}/{vram}",
+    }
+    pd.DataFrame([summary]).to_csv(
+        outdir / f"metrics_{args.protocol}.csv", index=False
+    )
 
-        print(f"Frames {args.frames} | Recall {recall:.2f}% | F1 {f1:.2f}% | Top1/5 {top1:.2f}/{top5:.2f}%")
-        print(f"Balanced Acc {balanced_acc:.2f}% | Kappa/Matthews {kappa:.2f}/{matthews:.2f}%")
-        print(f"Throughput {throughput:.2f} samples/s | Latency {latency:.1f} ms | RAM/VRAM {ram}/{vram}")
-
-        report = pd.DataFrame(classification_report(y_true, y_pred, output_dict=True, zero_division=0)).T
-        report.to_csv(outdir / f"report_{name}.csv", index=True)
-
-        summary = {
-            "Subset": name,
-            "Split": split_key,
-            "Frames": args.frames,
-            "Recall": f"{recall:.2f}%",
-            "F1": f"{f1:.2f}%",
-            "Top-1": f"{top1:.2f}%",
-            "Top-5": f"{top5:.2f}%",
-            "Balanced Accuracy": f"{balanced_acc:.2f}%",
-            "Kappa": f"{kappa:.2f}%",
-            "Matthews": f"{matthews:.2f}%",
-            "GFLOPs": f"{gflops:.2f}",
-            "Params(M)": f"{params_m:.2f}",
-            "Throughput(samples/s)": round(throughput, 2),
-            "Latency(ms)": round(latency, 1),
-            "RAM/VRAM(GB)": f"{ram}/{vram}",
-        }
-        summaries.append(summary)
-        pd.DataFrame([summary]).to_csv(outdir / f"metrics_{name}.csv", index=False)
-
-        cm = confusion_matrix(y_true, y_pred, normalize="true")
-        plt.figure(figsize=(8, 6))
-        plt.imshow(cm, cmap="viridis", vmin=0, vmax=1)
-        plt.colorbar()
-        plt.title(f"Confusion ({name})")
-        plt.tight_layout()
-        plt.savefig(outdir / f"confmat_{name}.png", dpi=200)
-        plt.close()
-
-    pd.DataFrame(summaries).to_csv(outdir / "metrics_summary.csv", index=False)
-    print(f"\nResults saved in {outdir}")
+    cm = confusion_matrix(y_true, y_pred, normalize="true")
+    plt.figure(figsize=(8, 6))
+    plt.imshow(cm, cmap="viridis", vmin=0, vmax=1)
+    plt.colorbar()
+    plt.title(f"Confusion ({args.protocol.upper()}, T={args.frames})")
+    plt.tight_layout()
+    plt.savefig(
+        outdir / f"confmat_{args.protocol}.png",
+        dpi=200,
+    )
+    plt.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Evaluate one protocol-specific CD-Former checkpoint."
+    )
     parser.add_argument("--pkl", required=True)
     parser.add_argument("--weights", required=True)
-    parser.add_argument("--missing_txt", default="")
-    parser.add_argument("--val_xsub", default="xsub_val")
-    parser.add_argument("--val_xset", default="xset_val")
-    parser.add_argument("--frames", type=int, default=32)
-    parser.add_argument("--d_model", type=int, default=192)
+    parser.add_argument("--protocol", choices=["xsub", "xset"], required=True)
+    parser.add_argument("--frames", type=int, choices=[16, 24, 32], required=True)
+    parser.add_argument("--missing-txt", dest="missing_txt", default="")
+    parser.add_argument("--d-model", dest="d_model", type=int, default=192)
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--layers", type=int, default=12)
-    parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--num_classes", type=int, default=120)
+    parser.add_argument("--d-ff", dest="d_ff", type=int, default=2048)
+    parser.add_argument("--dropout", type=float, default=0.15)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
-    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--num-workers", dest="num_workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--outdir", default="./metrics_eval")
     main(parser.parse_args())
