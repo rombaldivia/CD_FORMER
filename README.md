@@ -143,23 +143,32 @@ All generated `.pth` files, logs, and run outputs remain outside the public repo
 
 ## Evaluation
 
-The public release contains the evaluation code only. To evaluate a local CD-Former model file, provide its path explicitly.
+The public release contains the manuscript-aligned training and evaluation code. Trained model files are not distributed; provide local protocol-specific checkpoints when evaluating.
 
-For a single temporal configuration:
+For one protocol-specific checkpoint:
 
 ```bash
 python graphormer_frames_reset_eval.py \
   --pkl /path/to/ntu120_3danno.pkl \
-  --weights /path/to/local_model.pth \
-  --val_xsub xsub_val \
-  --val_xset xset_val \
+  --weights /path/to/local_xsub_T32_model.pth \
+  --protocol xsub \
   --frames 32 \
-  --d_model 192 \
+  --d-model 192 \
   --heads 8 \
   --layers 12 \
+  --d-ff 2048 \
+  --dropout 0.15 \
   --batch 32 \
   --device cuda \
-  --outdir results/metrics_eval_32f
+  --outdir results/xsub_T32
+```
+
+To evaluate all six NTU RGB+D 120 protocol/frame checkpoints used by the paper, set `WEIGHTS_XSUB_16`, `WEIGHTS_XSUB_24`, `WEIGHTS_XSUB_32`, `WEIGHTS_XSET_16`, `WEIGHTS_XSET_24`, and `WEIGHTS_XSET_32`, then run:
+
+```bash
+PKL_PATH=/path/to/ntu120_3danno.pkl \
+DEVICE=cuda \
+bash scripts/eval_cdformer.sh
 ```
 
 The evaluation script reports classification metrics, parameter count, analytical GFLOPs, throughput in samples/s, and latency in ms/sample.
