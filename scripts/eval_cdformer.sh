@@ -8,7 +8,7 @@ DATA_DIR="${DATA_DIR:-/data/nturgbd}"
 RESULTS_DIR="${RESULTS_DIR:-./results}"
 
 PKL_PATH="${PKL_PATH:-$DATA_DIR/ntu120_3danno.pkl}"
-WEIGHTS_PATH="${WEIGHTS_PATH:-$CODE_DIR/checkpoints/CD_former.pth}"
+WEIGHTS_PATH="${WEIGHTS_PATH:-}"
 SCRIPT_PATH="${SCRIPT_PATH:-$CODE_DIR/graphormer_frames_reset_eval.py}"
 DEVICE="${DEVICE:-cpu}"
 BATCH="${BATCH:-32}"
@@ -31,10 +31,15 @@ if [ ! -f "$SCRIPT_PATH" ]; then
   exit 1
 fi
 
+if [ -z "$WEIGHTS_PATH" ]; then
+  echo "ERROR: no checkpoint path supplied."
+  echo "Model weights are not distributed in this repository."
+  echo "Set WEIGHTS_PATH to a local checkpoint file before running evaluation."
+  exit 1
+fi
+
 if [ ! -f "$WEIGHTS_PATH" ]; then
-  echo "ERROR: checkpoint not found at $WEIGHTS_PATH"
-  echo "Available checkpoint files:"
-  find "$CODE_DIR" -maxdepth 4 \( -name "*.pth" -o -name "*.pt" -o -name "*.ckpt" \) || true
+  echo "ERROR: local checkpoint not found at $WEIGHTS_PATH"
   exit 1
 fi
 
