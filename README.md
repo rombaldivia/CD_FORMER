@@ -14,7 +14,7 @@
 
 CD-Former is a pure-Transformer framework for skeleton-based Human Action Recognition (HAR). It represents 3D skeleton sequences as contextual joint-frame tokens and models spatiotemporal relationships using standard multi-head self-attention.
 
-The public repository is intentionally limited to the **manuscript-aligned source code, evaluation utilities, documentation required to run the code, and figures**. Trained model parameters are not included.
+The public repository is intentionally limited to the **manuscript-aligned source code, training/evaluation utilities, documentation required to run the code, and figures**. Trained model parameters are not included.
 
 ---
 
@@ -42,10 +42,12 @@ The term **dynamic** refers to the input-dependent attention relations recompute
 
 ```text
 CD_FORMER/
+├── train_cdformer.py
 ├── graphormer_frames_reset_eval.py
 ├── README.md
 ├── requirements.txt
 ├── scripts/
+│   ├── kaggle_train.sh
 │   └── eval_cdformer.sh
 └── assets/
     └── figures/
@@ -75,6 +77,67 @@ ntu120_3danno.pkl
 ```
 
 The dataset itself is not distributed in this repository.
+
+---
+
+## Training
+
+The public training entry point is `train_cdformer.py`. It keeps XSUB and XSET as **separate protocol runs** and reads the corresponding PySKL split keys directly:
+
+- XSUB: `xsub_train` for optimization and `xsub_val` for protocol evaluation.
+- XSET: `xset_train` for optimization and `xset_val` for protocol evaluation.
+
+This matches the checkpoint-selection procedure disclosed in the manuscript. The `*_val` names are PySKL naming conventions for the official protocol evaluation partitions.
+
+The default training configuration follows the manuscript reference setting: `d_model=192`, 8 attention heads, 12 encoder layers, FFN width 2048, dropout 0.15, AdamW with learning rate `8e-3` and weight decay 0.1, label smoothing 0.1, temporal token dropout 0.2, temporal jitter 6, cosine annealing, a maximum of 200 epochs, patience 30, and an effective batch size of 400. On Kaggle, the effective batch is realized with gradient accumulation by default (`20 x 20 = 400`) to fit T4 memory.
+
+A single protocol run is:
+
+```bash
+python train_cdformer.py \
+  --pkl /path/to/ntu120_3danno.pkl \
+  --protocol xsub \
+  --frames 32 \
+  --outdir /kaggle/working/cdformer_runs/xsub/T32_seed42
+```
+
+The two-stage classification-head reset described in the manuscript is available by initializing a second run from a locally generated first-stage checkpoint:
+
+```bash
+python train_cdformer.py \
+  --pkl /path/to/ntu120_3danno.pkl \
+  --protocol xsub \
+  --frames 32 \
+  --init-checkpoint /path/to/first_stage/best_model.pth \
+  --reset-head \
+  --freeze-layers 12 \
+  --unfreeze-epoch 15 \
+  --outdir /kaggle/working/cdformer_runs/xsub/T32_reset_seed42
+```
+
+### Kaggle dual-T4 run
+
+For Kaggle with two visible T4 GPUs, `scripts/kaggle_train.sh` launches XSUB on GPU 0 and XSET on GPU 1 without combining their data or checkpoints:
+
+```bash
+PKL_PATH=/kaggle/input/<dataset>/ntu120_3danno.pkl \
+FRAMES=32 \
+SEED=42 \
+bash scripts/kaggle_train.sh
+```
+
+For the second head-reset stage, provide the two locally stored first-stage checkpoints:
+
+```bash
+INIT_XSUB=/kaggle/input/<private-checkpoints>/xsub_best_model.pth \
+INIT_XSET=/kaggle/input/<private-checkpoints>/xset_best_model.pth \
+PKL_PATH=/kaggle/input/<dataset>/ntu120_3danno.pkl \
+FRAMES=32 \
+SEED=42 \
+bash scripts/kaggle_train.sh
+```
+
+All generated `.pth` files, logs, and run outputs remain outside the public repository and are blocked by `.gitignore`.
 
 ---
 
