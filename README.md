@@ -1,50 +1,33 @@
 # CD-Former
 
-<p align="center">
-  <strong>A Contextual Dynamic Transformer for Skeleton-Based Human Action Recognition</strong>
-</p>
+Code accompanying **CD-Former: A Contextual Dynamic Transformer for Skeleton-Based Human Action Recognition**.
 
-<p align="center">
-  Pure-Transformer skeleton action recognition with contextual joint-frame tokenization and standard multi-head self-attention.
-</p>
+CD-Former uses joint-frame tokens with learnable temporal and joint embeddings and a standard Transformer encoder for skeleton action recognition.
 
----
+## Model
 
-## Overview
+The configuration used in the paper is:
 
-CD-Former is a pure-Transformer framework for skeleton-based Human Action Recognition (HAR). It represents 3D skeleton sequences as contextual joint-frame tokens and models spatiotemporal relationships using standard multi-head self-attention.
-
-The public repository is intentionally limited to the **manuscript-aligned source code, training/evaluation utilities, documentation required to run the code, and figures**. Trained model parameters are not included.
-
----
-
-## Architecture
-
-The manuscript reference configuration uses:
-
-- embedding dimension: **192**
-- attention heads: **8**
-- Transformer encoder layers: **12**
-- feed-forward dimension: **2048**
-- standard Post-LN Transformer encoder
-- temporal and joint-identity embeddings
-- first indexed skeleton stream for multi-body recordings
+- embedding dimension: 192
+- attention heads: 8
+- encoder layers: 12
+- FFN dimension: 2048
+- Post-LN Transformer encoder
+- 16, 24, and 32 frame inputs
+- first indexed skeleton stream for multi-person clips
 - frame-wise z-score normalization
-- center cropping for long clips and last-frame padding for short clips
+- center crop for long clips and last-frame padding for short clips
 
-The term **dynamic** refers to the input-dependent attention relations recomputed from each contextualized sequence. It does not denote a new attention operator, adaptive frame count, routing mechanism, or dynamic network topology.
+In the paper, *dynamic* refers to the attention matrix being recomputed from the current input sequence.
 
 ![CD-Former architecture](assets/figures/cdformer_architecture.png)
 
----
-
-## Repository structure
+## Files
 
 ```text
 CD_FORMER/
 ├── train_cdformer.py
 ├── graphormer_frames_reset_eval.py
-├── README.md
 ├── requirements.txt
 ├── scripts/
 │   ├── kaggle_train.sh
@@ -53,7 +36,7 @@ CD_FORMER/
     └── figures/
 ```
 
----
+Model checkpoints and datasets are not included in the repository.
 
 ## Installation
 
@@ -66,42 +49,37 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
----
+## Data
 
-## Dataset
-
-The evaluation code uses the PySKL NTU RGB+D 120 annotation file:
+The NTU RGB+D 120 experiments use the PySKL annotation file:
 
 ```text
 ntu120_3danno.pkl
 ```
 
-The dataset itself is not distributed in this repository.
+The protocol keys used by the scripts are:
 
----
+```text
+XSUB: xsub_train / xsub_val
+XSET: xset_train / xset_val
+```
 
 ## Training
 
-The public training entry point is `train_cdformer.py`. It keeps XSUB and XSET as **separate protocol runs** and reads the corresponding PySKL split keys directly:
-
-- XSUB: `xsub_train` for optimization and `xsub_val` for protocol evaluation.
-- XSET: `xset_train` for optimization and `xset_val` for protocol evaluation.
-
-This matches the checkpoint-selection procedure disclosed in the manuscript. The `*_val` names are PySKL naming conventions for the official protocol evaluation partitions.
-
-The default training configuration follows the manuscript reference setting: `d_model=192`, 8 attention heads, 12 encoder layers, FFN width 2048, dropout 0.15, AdamW with learning rate `8e-3` and weight decay 0.1, label smoothing 0.1, temporal token dropout 0.2, temporal jitter 6, cosine annealing, a maximum of 200 epochs, patience 30, and an effective batch size of 400. On Kaggle, the effective batch is realized with gradient accumulation by default (`20 x 20 = 400`) to fit T4 memory.
-
-A single protocol run is:
+A single run can be started with:
 
 ```bash
 python train_cdformer.py \
   --pkl /path/to/ntu120_3danno.pkl \
   --protocol xsub \
   --frames 32 \
+  --seed 42 \
   --outdir /kaggle/working/cdformer_runs/xsub/T32_seed42
 ```
 
-The two-stage classification-head reset described in the manuscript is available by initializing a second run from a locally generated first-stage checkpoint:
+Default settings follow the configuration reported in the paper: AdamW, learning rate `8e-3`, weight decay `0.1`, dropout `0.15`, label smoothing `0.1`, temporal dropout `0.2`, temporal jitter `6`, cosine annealing, 200 epochs, and patience 30.
+
+The training script also supports the head-reset stage:
 
 ```bash
 python train_cdformer.py \
@@ -115,9 +93,9 @@ python train_cdformer.py \
   --outdir /kaggle/working/cdformer_runs/xsub/T32_reset_seed42
 ```
 
-### Kaggle dual-T4 run
+### Kaggle
 
-For Kaggle with two visible T4 GPUs, `scripts/kaggle_train.sh` launches XSUB on GPU 0 and XSET on GPU 1 without combining their data or checkpoints:
+`scripts/kaggle_train.sh` runs XSUB on GPU 0 and XSET on GPU 1.
 
 ```bash
 PKL_PATH=/kaggle/input/<dataset>/ntu120_3danno.pkl \
@@ -126,44 +104,45 @@ SEED=42 \
 bash scripts/kaggle_train.sh
 ```
 
-For the second head-reset stage, provide the two locally stored first-stage checkpoints:
+For the head-reset stage:
 
 ```bash
-INIT_XSUB=/kaggle/input/<private-checkpoints>/xsub_best_model.pth \
-INIT_XSET=/kaggle/input/<private-checkpoints>/xset_best_model.pth \
+INIT_XSUB=/kaggle/input/<checkpoints>/xsub_best_model.pth \
+INIT_XSET=/kaggle/input/<checkpoints>/xset_best_model.pth \
 PKL_PATH=/kaggle/input/<dataset>/ntu120_3danno.pkl \
 FRAMES=32 \
 SEED=42 \
 bash scripts/kaggle_train.sh
 ```
-
-All generated `.pth` files, logs, and run outputs remain outside the public repository and are blocked by `.gitignore`.
-
----
 
 ## Evaluation
 
-The public release contains the manuscript-aligned training and evaluation code. Trained model files are not distributed; provide local protocol-specific checkpoints when evaluating.
-
-For one protocol-specific checkpoint:
+Evaluate one checkpoint with:
 
 ```bash
 python graphormer_frames_reset_eval.py \
   --pkl /path/to/ntu120_3danno.pkl \
-  --weights /path/to/local_xsub_T32_model.pth \
+  --weights /path/to/xsub_T32_model.pth \
   --protocol xsub \
   --frames 32 \
-  --d-model 192 \
-  --heads 8 \
-  --layers 12 \
-  --d-ff 2048 \
-  --dropout 0.15 \
-  --batch 32 \
   --device cuda \
   --outdir results/xsub_T32
 ```
 
-To evaluate all six NTU RGB+D 120 protocol/frame checkpoints used by the paper, set `WEIGHTS_XSUB_16`, `WEIGHTS_XSUB_24`, `WEIGHTS_XSUB_32`, `WEIGHTS_XSET_16`, `WEIGHTS_XSET_24`, and `WEIGHTS_XSET_32`, then run:
+The evaluator uses the same `CDFormer` class as the training script and checks that the checkpoint matches the requested protocol, frame length, and model structure.
+
+To evaluate the six NTU120 protocol/frame checkpoints, set:
+
+```text
+WEIGHTS_XSUB_16
+WEIGHTS_XSUB_24
+WEIGHTS_XSUB_32
+WEIGHTS_XSET_16
+WEIGHTS_XSET_24
+WEIGHTS_XSET_32
+```
+
+then run:
 
 ```bash
 PKL_PATH=/path/to/ntu120_3danno.pkl \
@@ -171,44 +150,31 @@ DEVICE=cuda \
 bash scripts/eval_cdformer.sh
 ```
 
-The evaluation script reports classification metrics, parameter count, analytical GFLOPs, throughput in samples/s, and latency in ms/sample.
+## Complexity
 
----
-
-## Manuscript-aligned analytical complexity
-
-The repository follows the same principal matrix-operation convention used in the manuscript:
+The FLOP count follows the convention used in the paper:
 
 ```text
-MACs_total =
+MACs =
     T*J*C*d
     + L*(4*M*d^2 + 2*M^2*d + 2*M*d*d_ff)
     + d*K
 
-FLOPs_total = 2 * MACs_total
+FLOPs = 2 * MACs
+M = T*J + 1
 ```
 
-with (M=TJ+1).
-
-For the manuscript architecture:
-
-| Frames | Analytical GFLOPs |
+| Frames | GFLOPs |
 |---:|---:|
 | 16 | 10.47 |
 | 24 | 16.80 |
 | 32 | 23.87 |
 
----
+## Figures
 
-## Qualitative analysis
+Additional figures used in the paper are available in `assets/figures/`.
 
-Manuscript-oriented attention and confusion-matrix figures are available under `assets/figures/`.
-
-![CD-Former qualitative attention visualization](assets/figures/cdformer_attention_examples.png)
-
-These visualizations are descriptive and are not interpreted as causal feature-importance evidence.
-
----
+![Attention examples](assets/figures/cdformer_attention_examples.png)
 
 ## Citation
 
@@ -221,8 +187,6 @@ These visualizations are descriptive and are not interpreted as causal feature-i
 }
 ```
 
----
-
 ## License
 
-The source code is provided for noncommercial academic and research use under the repository license.
+See [LICENSE](LICENSE).
