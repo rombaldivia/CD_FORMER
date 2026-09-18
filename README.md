@@ -10,45 +10,29 @@
 
 ---
 
-## Reviewer-facing repository note
+## Overview
 
-This public repository accompanies the CD-Former manuscript and exposes the **source code, training/evaluation utilities, documentation, and figures only**. **Trained model weights/checkpoints are intentionally not distributed publicly.**
+CD-Former is a pure-Transformer framework for skeleton-based Human Action Recognition (HAR). It represents 3D skeleton sequences as contextual joint-frame tokens and models spatiotemporal relationships using standard multi-head self-attention.
 
-The manuscript evaluates CD-Former with temporal windows of **16, 24, and 32 frames**. Its reference architecture uses:
+The public repository is intentionally limited to the **manuscript-aligned source code, evaluation utilities, documentation required to run the code, and figures**. Trained model parameters are not included.
+
+---
+
+## Architecture
+
+The manuscript reference configuration uses:
 
 - embedding dimension: **192**
 - attention heads: **8**
 - Transformer encoder layers: **12**
 - feed-forward dimension: **2048**
 - standard Post-LN Transformer encoder
+- temporal and joint-identity embeddings
 - first indexed skeleton stream for multi-body recordings
 - frame-wise z-score normalization
 - center cropping for long clips and last-frame padding for short clips
 
-The term **dynamic** in CD-Former refers to the input-dependent attention relations recomputed from each contextualized sequence. It does **not** denote a new attention operator, dynamic network topology, adaptive frame count, or routing/gating mechanism.
-
----
-
-## Important note on the reported experimental protocol
-
-The manuscript explicitly discloses that the historical reported checkpoints were selected by monitoring the PySKL protocol-specific partitions named `xsub_val` and `xset_val`, which correspond to the official NTU RGB+D 120 evaluation partitions. Therefore, the manuscript results are described as **checkpoint-selected evaluation values**, not strictly untouched-test estimates.
-
-The repository also contains `cd_former_official.py` and `scripts/kaggle_train_official.py`, which implement a **protocol-clean retraining workflow** that creates an internal validation split only from the official training partition and reserves the official evaluation partition for final testing. This newer workflow is provided for future reproducible retraining and **is not the procedure that generated the historical manuscript numbers**.
-
-See `docs/official_protocol_training.md` for that separate workflow.
-
----
-
-## Architecture
-
-CD-Former represents each skeleton joint at each frame as a joint-frame token. A linear projection maps 3D coordinates to the latent dimension, and learnable temporal and joint-identity embeddings provide contextual information before standard multi-head self-attention.
-
-The final representation combines:
-
-1. the learned CLS token, and
-2. the mean of all non-CLS token outputs,
-
-using element-wise addition before the linear classification head.
+The term **dynamic** refers to the input-dependent attention relations recomputed from each contextualized sequence. It does not denote a new attention operator, adaptive frame count, routing mechanism, or dynamic network topology.
 
 ![CD-Former architecture](assets/figures/cdformer_architecture.png)
 
@@ -59,21 +43,13 @@ using element-wise addition before the linear classification head.
 ```text
 CD_FORMER/
 ├── graphormer_frames_reset_eval.py
-├── cd_former_official.py
 ├── README.md
 ├── requirements.txt
 ├── scripts/
-│   ├── eval_cdformer.sh
-│   ├── train_cdformer.sh
-│   └── kaggle_train_official.py
-├── docs/
-│   └── official_protocol_training.md
-├── tests/
+│   └── eval_cdformer.sh
 └── assets/
     └── figures/
 ```
-
-Datasets, trained checkpoints, and experiment output directories are excluded from the public repository.
 
 ---
 
@@ -92,36 +68,26 @@ pip install -r requirements.txt
 
 ## Dataset
 
-The code uses the PySKL NTU RGB+D 120 annotation file:
+The evaluation code uses the PySKL NTU RGB+D 120 annotation file:
 
 ```text
 ntu120_3danno.pkl
 ```
 
-The PySKL split names `xsub_val` and `xset_val` are the protocol-specific **official evaluation partitions**, despite the historical `val` naming.
-
-Large dataset files are not stored in this repository.
+The dataset itself is not distributed in this repository.
 
 ---
 
-## Evaluation with local checkpoints
+## Evaluation
 
-Public weights are not included. To evaluate the three manuscript temporal configurations, provide one local checkpoint for each setting:
+The public release contains the evaluation code only. To evaluate a local CD-Former model file, provide its path explicitly.
 
-```bash
-WEIGHTS_16=/path/to/CDFormer_16f.pth \
-WEIGHTS_24=/path/to/CDFormer_24f.pth \
-WEIGHTS_32=/path/to/CDFormer_32f.pth \
-DEVICE=cuda \
-bash scripts/eval_cdformer.sh
-```
-
-For a single configuration:
+For a single temporal configuration:
 
 ```bash
 python graphormer_frames_reset_eval.py \
   --pkl /path/to/ntu120_3danno.pkl \
-  --weights /path/to/local_checkpoint.pth \
+  --weights /path/to/local_model.pth \
   --val_xsub xsub_val \
   --val_xset xset_val \
   --frames 32 \
@@ -133,13 +99,13 @@ python graphormer_frames_reset_eval.py \
   --outdir results/metrics_eval_32f
 ```
 
-The evaluation script reports classification metrics, parameter count, and **analytical GFLOPs using the same principal matrix-operation convention described in the manuscript (1 MAC = 2 FLOPs)**. Runtime throughput is reported in **samples/s**, with latency in **ms/sample**.
+The evaluation script reports classification metrics, parameter count, analytical GFLOPs, throughput in samples/s, and latency in ms/sample.
 
 ---
 
 ## Manuscript-aligned analytical complexity
 
-For sequence length (M=TJ+1), embedding dimension (d), feed-forward width (d_{ff}), (L) encoder layers, input channels (C), joints (J), and classes (K), the repository follows:
+The repository follows the same principal matrix-operation convention used in the manuscript:
 
 ```text
 MACs_total =
@@ -150,7 +116,9 @@ MACs_total =
 FLOPs_total = 2 * MACs_total
 ```
 
-For the manuscript architecture ((J=25), (C=3), (d=192), (d_{ff}=2048), (L=12), (K=120)):
+with (M=TJ+1).
+
+For the manuscript architecture:
 
 | Frames | Analytical GFLOPs |
 |---:|---:|
@@ -158,30 +126,15 @@ For the manuscript architecture ((J=25), (C=3), (d=192), (d_{ff}=2048), (L=12), 
 | 24 | 16.80 |
 | 32 | 23.87 |
 
-These values intentionally exclude element-wise activation, normalization, Softmax, and bias-addition operations, matching the manuscript definition.
-
 ---
 
 ## Qualitative analysis
 
-The repository contains the manuscript-oriented attention and confusion-matrix visualizations under `assets/figures/`.
+Manuscript-oriented attention and confusion-matrix figures are available under `assets/figures/`.
 
 ![CD-Former qualitative attention visualization](assets/figures/cdformer_attention_examples.png)
 
-These visualizations are descriptive and are not presented as causal feature-importance evidence.
-
----
-
-## Code-only public release
-
-The following are intentionally excluded from the public repository:
-
-- trained `.pth`, `.pt`, and `.ckpt` files
-- datasets and annotation binaries
-- experiment outputs and logs
-- private training artifacts
-
-The `.gitignore` enforces these exclusions for future commits.
+These visualizations are descriptive and are not interpreted as causal feature-importance evidence.
 
 ---
 
@@ -200,4 +153,4 @@ The `.gitignore` enforces these exclusions for future commits.
 
 ## License
 
-The source code is provided for noncommercial academic and research use under the repository license. Trained model weights are not part of the public release.
+The source code is provided for noncommercial academic and research use under the repository license.
