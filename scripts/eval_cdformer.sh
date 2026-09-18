@@ -1,54 +1,44 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "=== CD-Former Evaluation ==="
+echo "=== CD-Former manuscript-aligned evaluation ==="
 
-CODE_DIR="${CODE_DIR:-$(pwd)}"
+CODE_DIR="${CODE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 DATA_DIR="${DATA_DIR:-/data/nturgbd}"
 RESULTS_DIR="${RESULTS_DIR:-./results}"
-
 PKL_PATH="${PKL_PATH:-$DATA_DIR/ntu120_3danno.pkl}"
-WEIGHTS_PATH="${WEIGHTS_PATH:-}"
 SCRIPT_PATH="${SCRIPT_PATH:-$CODE_DIR/graphormer_frames_reset_eval.py}"
 DEVICE="${DEVICE:-cpu}"
 BATCH="${BATCH:-32}"
 
-mkdir -p "$DATA_DIR"
-mkdir -p "$RESULTS_DIR"
+mkdir -p "$DATA_DIR" "$RESULTS_DIR"
 
 if [ ! -f "$PKL_PATH" ]; then
   echo "Downloading NTU RGB+D 120 annotation file..."
   wget -O "$PKL_PATH" \
     https://download.openmmlab.com/mmaction/pyskl/data/nturgbd/ntu120_3danno.pkl
-else
-  echo "Annotation file already exists: $PKL_PATH"
 fi
 
 if [ ! -f "$SCRIPT_PATH" ]; then
   echo "ERROR: evaluation script not found at $SCRIPT_PATH"
-  echo "Available Python files:"
-  find "$CODE_DIR" -maxdepth 3 -name "*.py" || true
   exit 1
 fi
-
-if [ -z "$WEIGHTS_PATH" ]; then
-  echo "ERROR: no checkpoint path supplied."
-  echo "Model weights are not distributed in this repository."
-  echo "Set WEIGHTS_PATH to a local checkpoint file before running evaluation."
-  exit 1
-fi
-
-if [ ! -f "$WEIGHTS_PATH" ]; then
-  echo "ERROR: local checkpoint not found at $WEIGHTS_PATH"
-  exit 1
-fi
-
-echo "Using script: $SCRIPT_PATH"
-echo "Using checkpoint: $WEIGHTS_PATH"
-echo "Using PKL: $PKL_PATH"
-echo "Using device: $DEVICE"
 
 for FRAMES in 16 24 32; do
+  VAR="WEIGHTS_${FRAMES}"
+  WEIGHTS_PATH="${!VAR:-}"
+
+  if [ -z "$WEIGHTS_PATH" ]; then
+    echo "ERROR: $VAR is not set."
+    echo "Public model weights are intentionally not distributed in this repository."
+    echo "Provide the local checkpoint corresponding to each temporal configuration."
+    exit 1
+  fi
+  if [ ! -f "$WEIGHTS_PATH" ]; then
+    echo "ERROR: local checkpoint not found: $WEIGHTS_PATH"
+    exit 1
+  fi
+
   echo "=== Evaluating ${FRAMES} frames ==="
   python "$SCRIPT_PATH" \
     --pkl "$PKL_PATH" \
