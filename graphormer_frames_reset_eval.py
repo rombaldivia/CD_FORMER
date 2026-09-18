@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Protocol-specific CD-Former evaluation for NTU RGB+D 120.
+"""Evaluate a protocol-specific CD-Former checkpoint on NTU RGB+D 120.
 
-This file imports the public CDFormer implementation from train_cdformer.py so
-training and evaluation use exactly the same architecture. It does not redefine
-or alter the model.
-
-A checkpoint is evaluated only on its matching protocol partition:
-  XSUB -> xsub_val
-  XSET -> xset_val
-
-Accepted checkpoint formats:
-  1) checkpoints produced by train_cdformer.py (key: "model")
-  2) dictionaries containing "state_dict"
-  3) raw PyTorch state dictionaries
+The model definition is imported from train_cdformer.py so training and
+evaluation use the same architecture.
 """
 
 import argparse
@@ -206,7 +195,6 @@ def main(args):
         with open(args.missing_txt, encoding="utf-8") as handle:
             bad_ids = {line.strip() for line in handle if line.strip()}
 
-    # Preserve the exact public architecture from train_cdformer.py.
     model = CDFormer(
         seq_len=args.frames,
         num_joints=25,
@@ -226,7 +214,7 @@ def main(args):
         frames=args.frames,
     )
 
-    # Same analytical convention used in the manuscript.
+    # Analytical FLOPs used in the paper.
     J, C, K = 25, 3, 120
     d, d_ff, L = args.d_model, args.d_ff, args.layers
     M = args.frames * J + 1
