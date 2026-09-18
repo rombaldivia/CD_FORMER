@@ -49,7 +49,7 @@ The project is designed around three engineering priorities:
 - **Computational efficiency** — configurable temporal resolution and deployment-aware measurements for both conventional and edge-oriented environments.
 - **Reproducibility** — explicit evaluation scripts, checkpoint handling, validation reports, and documented experimental settings.
 
-This repository provides the implementation and evaluation resources associated with the accompanying CD-Former manuscript.
+This repository provides the implementation and evaluation code associated with the accompanying CD-Former manuscript. Model checkpoints and trained weights are not distributed in this public repository.
 
 ---
 
@@ -129,7 +129,7 @@ The repository supports evaluation at multiple temporal resolutions to examine t
 - Compact spatiotemporal tokenization.
 - Configurable embedding dimension, attention heads, Transformer depth, and frame count.
 - Support for NTU RGB+D 120 `xsub` and `xset` validation splits.
-- Pretrained-checkpoint loading and temporal-embedding adaptation.
+- Local-checkpoint loading and temporal-embedding adaptation.
 - Top-1, Top-5, recall, F1, balanced accuracy, Cohen's kappa, and Matthews correlation coefficient.
 - GFLOPs, FPS, latency, RAM, and VRAM reporting.
 - Automatic generation of confusion matrices and structured CSV results.
@@ -144,8 +144,6 @@ CD_FORMER/
 ├── graphormer_frames_reset_eval.py
 ├── README.md
 ├── requirements.txt
-├── checkpoints/
-│   └── CD_former.pth
 ├── scripts/
 │   ├── eval_cdformer.sh
 │   └── train_cdformer.sh
@@ -161,7 +159,7 @@ CD_FORMER/
         └── demo.mp4
 ```
 
-Large datasets are not stored in the repository. The NTU RGB+D 120 annotation resource can be downloaded automatically by the evaluation workflow.
+Large datasets and trained model weights are not stored in the repository. The NTU RGB+D 120 annotation resource can be downloaded automatically by the evaluation workflow.
 
 ---
 
@@ -198,22 +196,18 @@ xset_val
 
 ---
 
-## Pretrained Checkpoint
+## Model Weights
 
-Place the pretrained checkpoint at:
-
-```text
-checkpoints/CD_former.pth
-```
+Trained CD-Former checkpoints are not distributed in this public repository. To evaluate a locally available checkpoint, provide its path explicitly through `--weights` or the `WEIGHTS_PATH` environment variable.
 
 ---
 
 ## Evaluation
 
-Run the complete evaluation workflow with:
+Run the complete evaluation workflow with a local checkpoint:
 
 ```bash
-bash scripts/eval_cdformer.sh
+WEIGHTS_PATH=/path/to/local/CD_former.pth bash scripts/eval_cdformer.sh
 ```
 
 The workflow evaluates the supported frame configurations and stores the results under:
@@ -229,7 +223,7 @@ To evaluate a specific configuration manually:
 ```bash
 python graphormer_frames_reset_eval.py \
   --pkl /data/nturgbd/ntu120_3danno.pkl \
-  --weights checkpoints/CD_former.pth \
+  --weights /path/to/local/CD_former.pth \
   --val_xsub xsub_val \
   --val_xset xset_val \
   --frames 32 \
@@ -268,17 +262,13 @@ The evaluation pipeline records predictive metrics and computational measurement
 
 ## Code Ocean
 
-A reproducible Code Ocean execution can use:
+For a reproducible execution, mount or provide a checkpoint privately and pass its local path at runtime:
 
 ```bash
-bash /code/scripts/eval_cdformer.sh
+WEIGHTS_PATH=/path/to/local/CD_former.pth bash /code/scripts/eval_cdformer.sh
 ```
 
-When the checkpoint is stored directly as `/code/CD_former.pth`:
-
-```bash
-WEIGHTS_PATH=/code/CD_former.pth CODE_DIR=/code RESULTS_DIR=/results bash /code/scripts/eval_cdformer.sh
-```
+Model weights are intentionally excluded from the public source repository.
 
 ---
 
@@ -292,7 +282,7 @@ The repository includes a project demonstration:
 
 ## Research Status
 
-CD-Former is an active research project. The repository currently focuses on architecture documentation, pretrained evaluation, multi-frame validation, efficiency reporting, qualitative analysis, and reproducible execution.
+CD-Former is an active research project. The repository currently focuses on architecture documentation, evaluation code, multi-frame validation, computational reporting, qualitative analysis, and reproducible execution.
 
 Experimental results, manuscript terminology, and supporting resources may continue to evolve during the review and publication process.
 
